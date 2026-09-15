@@ -22,9 +22,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: belgium-public-data
-  # A newer code/data run supersedes an obsolete in-flight run. State is only
-  # restored from completed artifacts, so cancellation cannot corrupt history.
+  # v2 deliberately detaches the hardened pipeline from the obsolete first
+  # bootstrap, whose concurrency contract cannot be changed retroactively.
+  group: belgium-public-data-v2
   cancel-in-progress: true
 
 jobs:
