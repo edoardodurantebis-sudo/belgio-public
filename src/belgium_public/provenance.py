@@ -1,5 +1,5 @@
 from __future__ import annotations
-import gzip, hashlib, json
+import gzip, hashlib, json, re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -10,11 +10,18 @@ def utc_now() -> datetime:
 
 
 def stamp(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microseconds prevent two paginated/NRT responses retrieved in the same
+    # second from overwriting each other.
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _safe_suffix_token(suffix: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", suffix).strip("_")
+    return token or "raw"
 
 
 def save_raw_vintage(base: Path, provider: str, source_id: str, payload: bytes, *, url: str, retrieved_at: datetime, headers: Mapping[str, str] | None = None, suffix: str = "csv") -> tuple[Path, Path]:
@@ -22,7 +29,7 @@ def save_raw_vintage(base: Path, provider: str, source_id: str, payload: bytes, 
     folder.mkdir(parents=True, exist_ok=True)
     stem = stamp(retrieved_at)
     raw_path = folder / f"{stem}.{suffix}.gz"
-    meta_path = folder / f"{stem}.meta.json"
+    meta_path = folder / f"{stem}.{_safe_suffix_token(suffix)}.meta.json"
     with gzip.open(raw_path, "wb") as fh:
         fh.write(payload)
     meta = {
