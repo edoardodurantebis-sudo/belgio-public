@@ -10,8 +10,7 @@ from belgium_public.config import ROOT, SourceSpec, load_registry
 from belgium_public.elia import collect_elia, discover_datetime_bounds
 from belgium_public.health import build_health
 from belgium_public.jao import collect_jao_maxexchanges
-
-CORE_TIERS = {"core", "core_pre_mari", "jao_canary"}
+from belgium_public.planning import select_sources, year_windows
 
 
 def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | None:
@@ -24,35 +23,6 @@ def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | Non
         return None
     dt = pd.to_datetime(df["delivery_start_utc"], utc=True, errors="coerce").dropna()
     return pd.Timestamp(dt.max()) if not dt.empty else None
-
-
-def _year_windows(first: pd.Timestamp, last: pd.Timestamp):
-    start = first.floor("D")
-    stop = last.ceil("D") + pd.Timedelta(days=1)
-    cursor = start
-    while cursor < stop:
-        nxt = min(cursor + pd.DateOffset(years=1), stop)
-        yield cursor, pd.Timestamp(nxt)
-        cursor = pd.Timestamp(nxt)
-
-
-def _select_sources(sources: list[SourceSpec], *, mode: str, explicit: set[str], tiers: set[str]) -> list[SourceSpec]:
-    selected = [s for s in sources if not explicit or s.id in explicit]
-    if mode == "nrt":
-        selected = [s for s in selected if s.mode == "snapshot"]
-    elif mode in {"bootstrap", "incremental"}:
-        selected = [s for s in selected if s.mode in {"historical", "jao_daily"}]
-    elif mode == "all":
-        selected = [s for s in selected if s.mode in {"historical", "jao_daily", "snapshot"}]
-
-    if tiers:
-        selected = [s for s in selected if s.tier in tiers]
-    elif not explicit and mode != "nrt":
-        selected = [s for s in selected if s.tier in CORE_TIERS]
-
-    if not explicit:
-        selected = [s for s in selected if s.tier != "lab_optional"]
-    return selected
 
 
 def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: Path, mode: str, since_override: str | None) -> dict:
@@ -72,7 +42,7 @@ def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: P
     first, last = discover_datetime_bounds(spec)
     chunks = 0
     rows = 0
-    for start, end in _year_windows(first, last):
+    for start, end in year_windows(first, last):
         result = collect_elia(spec, raw_root, start=start, end=end)
         if result["df"].empty:
             continue
@@ -103,7 +73,7 @@ def main():
     sources, registry = load_registry()
     explicit = set(args.source or [])
     tiers = set(args.tier or [])
-    selected = _select_sources(sources, mode=args.mode, explicit=explicit, tiers=tiers)
+    selected = select_sources(sources, mode=args.mode, explicit=explicit, tiers=tiers)
 
     raw_root = ROOT / "data" / "raw"
     canonical_root = ROOT / "data" / "canonical"
