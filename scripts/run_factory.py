@@ -26,6 +26,21 @@ def _last_delivery(spec: SourceSpec, canonical_root: Path) -> str | None:
     return dt.max().isoformat().replace("+00:00", "Z")
 
 
+def _select_sources(sources: list[SourceSpec], *, mode: str, explicit: set[str]) -> list[SourceSpec]:
+    selected = [s for s in sources if not explicit or s.id in explicit]
+    if mode == "nrt":
+        selected = [s for s in selected if s.mode == "snapshot"]
+    elif mode in {"bootstrap", "incremental"}:
+        selected = [s for s in selected if s.mode in {"historical", "jao_daily"}]
+    elif mode == "all":
+        selected = [s for s in selected if s.mode in {"historical", "jao_daily", "snapshot"}]
+    # Very large research tables require date-window collectors. They are never
+    # pulled wholesale unless the caller names the source explicitly.
+    if not explicit:
+        selected = [s for s in selected if s.tier != "lab_optional"]
+    return selected
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["bootstrap", "incremental", "nrt", "all"], default="incremental")
@@ -36,13 +51,8 @@ def main():
     args = ap.parse_args()
 
     sources, registry = load_registry()
-    selected = [s for s in sources if not args.source or s.id in set(args.source)]
-    if args.mode == "bootstrap":
-        selected = [s for s in selected if s.mode == "historical"]
-    elif args.mode == "nrt":
-        selected = [s for s in selected if s.mode == "snapshot"]
-    elif args.mode == "incremental":
-        selected = [s for s in selected if s.mode == "historical"]
+    explicit = set(args.source or [])
+    selected = _select_sources(sources, mode=args.mode, explicit=explicit)
 
     raw_root = ROOT / "data" / "raw"
     canonical_root = ROOT / "data" / "canonical"
@@ -50,13 +60,15 @@ def main():
     failures: list[dict] = []
 
     for spec in selected:
+        since = None
         try:
-            since = None
             if spec.provider == "Elia":
                 if args.mode in {"incremental", "all"} and spec.mode == "historical":
                     since = args.since or _last_delivery(spec, canonical_root)
                 result = collect_elia(spec, raw_root, since=since)
             elif spec.provider == "JAO" and spec.id == "jao_core_maxexchanges":
+                # Canary is intentionally small. Full Core historical backfill is
+                # a separate date-window job after endpoint/schema certification.
                 result = collect_jao_maxexchanges(spec, date.today() - timedelta(days=2), raw_root)
             else:
                 continue
@@ -75,6 +87,7 @@ def main():
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "mode": args.mode,
+        "selected_sources": [s.id for s in selected],
         "events": events,
         "failures": failures,
         "health": health["overall_status"],

@@ -42,11 +42,20 @@ def inspect_source(spec: SourceSpec, path: Path) -> dict:
     dt_col = "delivery_start_utc" if "delivery_start_utc" in df.columns else resolve_col(df, "datetime")
     min_dt = max_dt = None
     bad_time = 0
+    unique_delivery = 0
+    median_step_minutes = None
+    coverage_days = None
     if dt_col:
         dt = pd.to_datetime(df[dt_col], utc=True, errors="coerce")
         bad_time = int(dt.isna().sum())
-        if dt.notna().any():
-            min_dt, max_dt = dt.min(), dt.max()
+        good = dt.dropna().drop_duplicates().sort_values()
+        unique_delivery = int(len(good))
+        if len(good):
+            min_dt, max_dt = good.iloc[0], good.iloc[-1]
+            coverage_days = float((max_dt - min_dt).total_seconds() / 86400.0)
+        if len(good) > 1:
+            deltas = good.diff().dropna().dt.total_seconds() / 60.0
+            median_step_minutes = float(deltas.median())
 
     keys = [resolve_col(df, k) for k in spec.primary_key]
     unresolved_keys = [k for k, resolved in zip(spec.primary_key, keys) if resolved is None]
@@ -73,6 +82,9 @@ def inspect_source(spec: SourceSpec, path: Path) -> dict:
         "columns": int(len(df.columns)),
         "first_delivery_utc": _iso(min_dt),
         "last_delivery_utc": _iso(max_dt),
+        "coverage_days_span": coverage_days,
+        "unique_delivery_timestamps": unique_delivery,
+        "median_unique_timestep_minutes": median_step_minutes,
         "duplicate_keys": dup,
         "bad_timestamps": bad_time,
         "missing_required_fields": missing_fields,
