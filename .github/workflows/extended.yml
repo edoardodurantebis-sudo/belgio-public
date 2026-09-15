@@ -1,0 +1,49 @@
+name: Belgium Public Extended Historical Sources
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '47 04 * * 1,4'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: belgium-public-data
+  cancel-in-progress: false
+
+jobs:
+  extended:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: python -m pip install -e .
+      - name: Restore cumulative data state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/restore_latest_state.sh
+      - name: Backfill/update non-core public sources
+        run: python scripts/run_factory.py --mode incremental --tier extended
+      - name: Rebuild case registry
+        if: always()
+        run: python scripts/run_case_studies.py
+      - name: Re-evaluate scientific gate
+        if: always()
+        run: python scripts/run_lab.py
+      - name: Upload cumulative state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: belgium-public-state
+          path: |
+            data/raw
+            data/canonical
+            state
+            research
+          retention-days: 30
+          if-no-files-found: warn

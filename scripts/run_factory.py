@@ -7,12 +7,14 @@ import pandas as pd
 
 from belgium_public.canonical import canonicalize
 from belgium_public.config import ROOT, SourceSpec, load_registry
-from belgium_public.elia import collect_elia
+from belgium_public.elia import collect_elia, discover_datetime_bounds
 from belgium_public.health import build_health
 from belgium_public.jao import collect_jao_maxexchanges
 
+CORE_TIERS = {"core", "core_pre_mari", "jao_canary"}
 
-def _last_delivery(spec: SourceSpec, canonical_root: Path) -> str | None:
+
+def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | None:
     path = canonical_root / f"{spec.id}.parquet"
     if not path.exists():
         return None
@@ -21,12 +23,20 @@ def _last_delivery(spec: SourceSpec, canonical_root: Path) -> str | None:
     except Exception:
         return None
     dt = pd.to_datetime(df["delivery_start_utc"], utc=True, errors="coerce").dropna()
-    if dt.empty:
-        return None
-    return dt.max().isoformat().replace("+00:00", "Z")
+    return pd.Timestamp(dt.max()) if not dt.empty else None
 
 
-def _select_sources(sources: list[SourceSpec], *, mode: str, explicit: set[str]) -> list[SourceSpec]:
+def _year_windows(first: pd.Timestamp, last: pd.Timestamp):
+    start = first.floor("D")
+    stop = last.ceil("D") + pd.Timedelta(days=1)
+    cursor = start
+    while cursor < stop:
+        nxt = min(cursor + pd.DateOffset(years=1), stop)
+        yield cursor, pd.Timestamp(nxt)
+        cursor = pd.Timestamp(nxt)
+
+
+def _select_sources(sources: list[SourceSpec], *, mode: str, explicit: set[str], tiers: set[str]) -> list[SourceSpec]:
     selected = [s for s in sources if not explicit or s.id in explicit]
     if mode == "nrt":
         selected = [s for s in selected if s.mode == "snapshot"]
@@ -34,17 +44,57 @@ def _select_sources(sources: list[SourceSpec], *, mode: str, explicit: set[str])
         selected = [s for s in selected if s.mode in {"historical", "jao_daily"}]
     elif mode == "all":
         selected = [s for s in selected if s.mode in {"historical", "jao_daily", "snapshot"}]
-    # Very large research tables require date-window collectors. They are never
-    # pulled wholesale unless the caller names the source explicitly.
+
+    if tiers:
+        selected = [s for s in selected if s.tier in tiers]
+    elif not explicit and mode != "nrt":
+        selected = [s for s in selected if s.tier in CORE_TIERS]
+
     if not explicit:
         selected = [s for s in selected if s.tier != "lab_optional"]
     return selected
+
+
+def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: Path, mode: str, since_override: str | None) -> dict:
+    last_local = _last_delivery(spec, canonical_root)
+    if since_override:
+        result = collect_elia(spec, raw_root, after=since_override)
+        can = canonicalize(result, canonical_root)
+        return {"chunks": 1, "rows_canonical": can["rows"], "strategy": "explicit_incremental", "after": since_override}
+
+    if last_local is not None and mode in {"incremental", "all"}:
+        result = collect_elia(spec, raw_root, after=last_local)
+        can = canonicalize(result, canonical_root)
+        return {"chunks": 1, "rows_canonical": can["rows"], "strategy": "incremental", "after": last_local.isoformat()}
+
+    # Missing canonical history is always bootstrapped in bounded yearly windows,
+    # even if an incremental workflow reached the source for the first time.
+    first, last = discover_datetime_bounds(spec)
+    chunks = 0
+    rows = 0
+    for start, end in _year_windows(first, last):
+        result = collect_elia(spec, raw_root, start=start, end=end)
+        if result["df"].empty:
+            continue
+        can = canonicalize(result, canonical_root)
+        chunks += 1
+        rows = can["rows"]
+    if chunks == 0:
+        raise RuntimeError(f"{spec.id}: bootstrap produced no data")
+    return {
+        "chunks": chunks,
+        "rows_canonical": rows,
+        "strategy": "yearly_bootstrap",
+        "provider_first_utc": first.isoformat(),
+        "provider_last_utc": last.isoformat(),
+    }
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["bootstrap", "incremental", "nrt", "all"], default="incremental")
     ap.add_argument("--source", action="append", help="limit to source id; repeatable")
+    ap.add_argument("--tier", action="append", help="limit to source tier; repeatable")
     ap.add_argument("--since", help="UTC ISO date/time override for historical incremental filter")
     ap.add_argument("--strict", action="store_true", help="exit non-zero if any selected collector fails")
     ap.add_argument("--strict-core", action="store_true", help="exit non-zero if a selected core collector fails")
@@ -52,7 +102,8 @@ def main():
 
     sources, registry = load_registry()
     explicit = set(args.source or [])
-    selected = _select_sources(sources, mode=args.mode, explicit=explicit)
+    tiers = set(args.tier or [])
+    selected = _select_sources(sources, mode=args.mode, explicit=explicit, tiers=tiers)
 
     raw_root = ROOT / "data" / "raw"
     canonical_root = ROOT / "data" / "canonical"
@@ -60,26 +111,18 @@ def main():
     failures: list[dict] = []
 
     for spec in selected:
-        since = None
         try:
-            if spec.provider == "Elia":
-                if args.mode in {"incremental", "all"} and spec.mode == "historical":
-                    since = args.since or _last_delivery(spec, canonical_root)
-                result = collect_elia(spec, raw_root, since=since)
+            if spec.provider == "Elia" and spec.mode == "historical":
+                detail = _collect_historical_elia(spec, raw_root, canonical_root, args.mode, args.since)
+                events.append({"source_id": spec.id, "status": "PASS", **detail})
+            elif spec.provider == "Elia" and spec.mode == "snapshot":
+                result = collect_elia(spec, raw_root)
+                can = canonicalize(result, canonical_root)
+                events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "snapshot"})
             elif spec.provider == "JAO" and spec.id == "jao_core_maxexchanges":
-                # Canary is intentionally small. Full Core historical backfill is
-                # a separate date-window job after endpoint/schema certification.
                 result = collect_jao_maxexchanges(spec, date.today() - timedelta(days=2), raw_root)
-            else:
-                continue
-            can = canonicalize(result, canonical_root)
-            events.append({
-                "source_id": spec.id,
-                "status": "PASS",
-                "rows_canonical": can["rows"],
-                "raw": str(result["raw_path"].relative_to(ROOT)),
-                "incremental_since": since,
-            })
+                can = canonicalize(result, canonical_root)
+                events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "canary_day"})
         except Exception as e:
             failures.append({"source_id": spec.id, "tier": spec.tier, "status": "FAIL", "error": repr(e)})
 

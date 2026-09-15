@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -18,16 +19,7 @@ class CollectorError(RuntimeError):
     pass
 
 
-def _export_url(source_id: str, where: str | None = None) -> str:
-    params = {"timezone": "UTC", "use_labels_for_header": "false"}
-    if where:
-        params["where"] = where
-    return f"{BASE}/{source_id}/exports/csv?{urlencode(params)}"
-
-
 def _session() -> requests.Session:
-    # Elia's public portal can transiently return 429/5xx under load. Retry only
-    # safe GETs and still fail closed once the bounded retry budget is exhausted.
     retry = Retry(
         total=4,
         connect=4,
@@ -46,16 +38,73 @@ def _session() -> requests.Session:
     return s
 
 
-def collect_elia(spec: SourceSpec, raw_root: Path, *, since: str | None = None, timeout: tuple[int, int] = (20, 180)) -> dict:
+def _fmt_ods(dt: str | pd.Timestamp | datetime) -> str:
+    t = pd.Timestamp(dt)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _export_url(source_id: str, where: str | None = None) -> str:
+    params = {"timezone": "UTC", "use_labels_for_header": "false"}
+    if where:
+        params["where"] = where
+    return f"{BASE}/{source_id}/exports/csv?{urlencode(params)}"
+
+
+def discover_datetime_bounds(spec: SourceSpec, timeout: tuple[int, int] = (20, 60)) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Discover provider-native first/last datetime without downloading history."""
+    url = f"{BASE}/{spec.id}/records"
+    values: list[pd.Timestamp] = []
+    try:
+        with _session() as session:
+            for order_by in ("datetime", "datetime desc"):
+                r = session.get(
+                    url,
+                    params={"select": "datetime", "order_by": order_by, "limit": 1, "timezone": "UTC"},
+                    timeout=timeout,
+                )
+                if r.status_code != 200:
+                    raise CollectorError(f"{spec.id}: bounds HTTP {r.status_code}: {r.text[:300]}")
+                payload = r.json()
+                rows = payload.get("results", []) if isinstance(payload, dict) else []
+                if not rows or "datetime" not in rows[0]:
+                    raise CollectorError(f"{spec.id}: cannot discover datetime bounds")
+                value = pd.to_datetime(rows[0]["datetime"], utc=True, errors="raise")
+                values.append(pd.Timestamp(value))
+    except requests.RequestException as e:
+        raise CollectorError(f"{spec.id}: bounds network error: {e}") from e
+    if values[0] > values[1]:
+        values.reverse()
+    return values[0], values[1]
+
+
+def collect_elia(
+    spec: SourceSpec,
+    raw_root: Path,
+    *,
+    after: str | pd.Timestamp | None = None,
+    start: str | pd.Timestamp | None = None,
+    end: str | pd.Timestamp | None = None,
+    timeout: tuple[int, int] = (20, 180),
+) -> dict:
     if spec.provider != "Elia":
         raise ValueError(spec.id)
+    if after is not None and start is not None:
+        raise ValueError("Use after or start, not both")
+
+    clauses: list[str] = []
+    if after is not None:
+        clauses.append(f"datetime > date'{_fmt_ods(after)}'")
+    if start is not None:
+        clauses.append(f"datetime >= date'{_fmt_ods(start)}'")
+    if end is not None:
+        clauses.append(f"datetime < date'{_fmt_ods(end)}'")
+    where = " and ".join(clauses) or None
+
     retrieved = utc_now()
-    where = None
-    if since and spec.mode == "historical":
-        # Opendatasoft Explore v2.1 accepts ODSQL date literals. Provider
-        # rejection is a hard collector failure; never silently fall back to a
-        # full-history rewrite on an incremental run.
-        where = f"datetime > date'{since}'"
     url = _export_url(spec.id, where=where)
     try:
         with _session() as session:
@@ -69,6 +118,7 @@ def collect_elia(spec: SourceSpec, raw_root: Path, *, since: str | None = None, 
         raise CollectorError(f"{spec.id}: empty response")
     if body[:1] in (b"{", b"[") and b"error" in body[:500].lower():
         raise CollectorError(f"{spec.id}: provider returned error payload")
+
     raw_path, meta_path = save_raw_vintage(
         raw_root,
         "Elia",
@@ -92,4 +142,5 @@ def collect_elia(spec: SourceSpec, raw_root: Path, *, since: str | None = None, 
         "url": r.url,
         "raw_path": raw_path,
         "meta_path": meta_path,
+        "window": {"after": str(after) if after is not None else None, "start": str(start) if start is not None else None, "end": str(end) if end is not None else None},
     }
