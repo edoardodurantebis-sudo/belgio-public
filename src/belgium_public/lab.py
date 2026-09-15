@@ -5,8 +5,15 @@ from pathlib import Path
 import pandas as pd
 
 
+def _load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
-    health = json.loads(health_path.read_text(encoding="utf-8"))
+    health = _load_json(health_path)
     if health.get("overall_status") != "PASS":
         payload = {
             "status": "BLOCKED",
@@ -33,6 +40,43 @@ def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
             "note": "System imbalance / balancing-price components can be aligned with ODS134 and activation volumes for ex-post case studies.",
         })
 
+    jao_audit = _load_json(health_path.parent / "JAO_ENDPOINT_AUDIT.json")
+    verified = jao_audit.get("verified", []) if jao_audit.get("status") == "VERIFIED" else []
+    if verified:
+        mechanisms.append({
+            "name": "JAO_Core_Final_Computation_endpoint_schema_verified",
+            "classification": "mechanism_ready",
+            "endpoint": verified[0].get("url"),
+            "schema_proof": "live HTTP 200 with RAM + PTDF + CNEC identity",
+            "note": "Endpoint/schema uncertainty is closed. Historical PIT publication-time certification remains separate.",
+        })
+
+    if "jao_core_final_computation" in available:
+        jao_df = pd.read_parquet(canonical_root / "jao_core_final_computation.parquet")
+        mechanisms.append({
+            "name": "JAO_Core_Final_Computation_history_available",
+            "classification": "mechanism_ready",
+            "evidence_rows": int(len(jao_df)),
+            "note": "CNEC/RAM/PTDF history is available for ex-post congestion mechanism analysis; it is not automatically PIT-safe.",
+        })
+
+    insufficient = [
+        {
+            "name": "historical_most_recent_forecast_revision_rules",
+            "reason": "historical publication/knowledge timestamp is not yet certified; prospective NRT vintages are being accumulated",
+        }
+    ]
+    if verified:
+        insufficient.append({
+            "name": "JAO_CNEC_RAM_PTDF_ex_ante_rules",
+            "reason": "endpoint and schema are verified, but scheduled publication time is not proof of the actual historical knowledge timestamp for every vintage",
+        })
+    else:
+        insufficient.append({
+            "name": "JAO_CNEC_RAM_PTDF_rules",
+            "reason": "live Core domain endpoint/schema is not yet certified",
+        })
+
     payload = {
         "status": "PASS_NO_EDGE_PROMOTED",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -40,16 +84,7 @@ def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
         "robust": [],
         "watchlist": [],
         "rejected": [],
-        "insufficient_evidence": [
-            {
-                "name": "historical_most_recent_forecast_revision_rules",
-                "reason": "historical publication/knowledge timestamp is not yet certified; prospective NRT vintages are being accumulated",
-            },
-            {
-                "name": "JAO_CNEC_RAM_PTDF_rules",
-                "reason": "exact Core domain endpoint/schema and historical publication timestamp mapping are not yet certified",
-            },
-        ],
+        "insufficient_evidence": insufficient,
         "policy": "No rule promotion until feature availability is certified and temporal holdout/walk-forward tests exist.",
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
