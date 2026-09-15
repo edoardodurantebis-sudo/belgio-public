@@ -23,7 +23,9 @@ permissions:
 
 concurrency:
   group: belgium-public-data
-  cancel-in-progress: false
+  # A newer code/data run supersedes an obsolete in-flight run. State is only
+  # restored from completed artifacts, so cancellation cannot corrupt history.
+  cancel-in-progress: true
 
 jobs:
   factory:
@@ -52,6 +54,12 @@ jobs:
           fi
           echo "Factory mode: ${MODE}"
           python scripts/run_factory.py --mode "${MODE}" --strict-core
+      - name: Audit JAO Core CNEC/RAM/PTDF endpoint without guessing
+        if: always()
+        run: python scripts/run_jao_audit.py
+      - name: Build reproducible ex-post case registry
+        if: always()
+        run: python scripts/run_case_studies.py
       - name: Run market-lab scientific gate
         if: always()
         run: python scripts/run_lab.py
