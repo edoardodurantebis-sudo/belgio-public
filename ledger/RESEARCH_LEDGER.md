@@ -47,3 +47,83 @@ Official JAO documentation confirms a public HTTPS/JSON GET web service and expl
 3. Add ENTSO-E Transparency only where it adds independent coverage/provenance vs Elia, avoiding duplicate complexity.
 4. Build first real market-tape case studies: large positive/negative system imbalance, extreme imbalance price, renewable forecast miss, and import/export constraint episodes.
 5. Only after PIT registry is green: residual-load / forecast-revision / congestion regime discovery with temporal holdout and walk-forward.
+
+## 2026-09-15 — First green end-to-end public factory + hardening findings
+
+### End-to-end run
+- GitHub Actions run **34951767576** completed successfully: historical collector, canonical build, health, live JAO endpoint audit, case-study registry, lab gate and artifact upload all passed operationally.
+- Artifact `belgium-public-state` id **10389309014**: 423,901,579 bytes compressed; GitHub digest `sha256:c433db148fee667c4bf4bda0af418c3c0565555bdf308e44c8e878acd2973dab`.
+- The original monolithic export design was retired. Historical Elia bootstrap is bounded/resumable; state-writing workflows are serialized through one concurrency lock.
+
+### Actual canonical coverage measured from the artifact
+- **ODS134** post-MARI imbalance: 81,216 QH; 2024-05-21 22:00 UTC → 2026-09-14 21:45 UTC.
+- **ODS047** pre-MARI imbalance: 329,180 QH; 2014-12-31 23:00 UTC → 2024-05-21 21:45 UTC.
+- **ODS127** balancing-volume components: 81,216 QH; same post-MARI span as ODS134.
+- **ODS132** activated volumes: 81,193 QH; starts 15 minutes later than ODS134 and contains 23 fewer distinct timestamps. This is now explicitly surfaced by health-v2 rather than hidden by a file-exists check.
+- **ODS166** balancing-price components: 81,216 QH; same post-MARI span as ODS134.
+- **ODS001** load: 411,164 rows; 2014-12-31 23:00 UTC → forecast horizon 2026-09-22 21:45 UTC.
+- **ODS031** wind: 1,235,796 rows / 411,932 distinct delivery timestamps; 2014-12-31 23:00 UTC → forecast horizon 2026-09-30 21:45 UTC.
+- **ODS032** PV: 2,963,520 rows / 211,680 distinct delivery timestamps; 2020-08-31 22:00 UTC → 2026-09-14 21:45 UTC.
+- **ODS026** physical cross-border flow: 1,617,684 rows / 410,396 distinct delivery timestamps; 2014-12-31 23:00 UTC → 2026-09-14 21:45 UTC.
+- **ODS013** intraday capacity historical: 103,488 rows / 51,744 distinct timestamps; 2024-12-31 23:00 UTC → 2026-09-14 21:45 UTC. Its historical PIT semantics remain unproved.
+
+### Correction — JAO Core endpoint is now verified
+The bootstrap entry above said the exact current CNEC/RAM/PTDF endpoint was still unverified. That uncertainty is now closed.
+
+A live fail-closed audit on 2026-09-15 verified:
+- endpoint: `https://publicationtool.jao.eu/core/api/data/finalComputation`
+- HTTP 200 with `FromUtc` / `ToUtc` pagination contract;
+- schema contains `ram`, CNEC/CNE identity fields and multiple `ptdf_*` hub columns.
+
+The legacy path family used by the original Max Exchanges canary returned HTTP 400 requiring `FromUtc` and `ToUtc`; it is therefore removed from the logical registry and replaced by the verified Final Computation source. Endpoint/schema verification makes Core FB data **mechanism-ready ex-post**, but does **not** prove historical ex-ante knowledge time. Scheduled handbook times remain distinct from observed publication timestamps.
+
+### Additional official Elia mechanism sources registered
+- **ODS133** historical minute imbalance price; **ODS161** live minute imbalance price; **ODS162** live QH imbalance price.
+- **ODS165** historical minute balancing-price components; **ODS174** live minute balancing-volume components; **ODS135** live activated volumes.
+- **ODS015/016** DA/final commercial cross-border schedules; **ODS014** long-term capacity.
+- **ODS153** available balancing-energy prices.
+- **ODS156** post-MARI individual incremental balancing bids; **ODS068/069** pre-MARI individual incremental/decremental bids.
+- **ODS064** pre-MARI activated balancing-energy prices.
+These are extended/lab inputs until their schema and publication semantics are certified; registering them does not imply PIT safety.
+
+### Additional Core intraday structural breaks
+- **29/05/2024 — IDCC(b) go-live**.
+- **25/06/2025 — IDCC(c) go-live**.
+- **28/04/2026 — IDCC(d) go-live**.
+Documented fallback/incident business days must be flagged rather than pooled as ordinary observations.
+
+### Incremental-watermark bug found and fixed
+Historical forecast tables can contain delivery timestamps beyond “now”. Using maximum delivery timestamp as an incremental watermark therefore risks skipping revisions and actual values in the present. Factory logic now uses overlapping cursors:
+- mixed forecast/actual or versioned data: `min(max_delivery, now) - 30d`;
+- immutable-ish outcome histories: small 2-day overlap;
+- prospective vintage families preserve retrieval time separately.
+This keeps updates idempotent while catching corrections/revisions.
+
+### Health gate v2
+The first artifact's health-v1 status was operationally green but not strict enough to be the final scientific certificate. Health-v2 now records and gates:
+- schema fingerprint and cross-run schema drift;
+- expected vs observed fixed granularity;
+- coverage ratio, missing intervals and maximum gap;
+- off-grid timestamps and duplicate keys;
+- post-MARI tape joinability across ODS134/127/132/166.
+The lab remains fail-closed if this gate fails.
+
+### First reproducible extreme cases from ODS134
+These are **case-study selectors, not trading rules**:
+- 2025-02-08 10:45 UTC: SI +1,351.395 MW; imbalance price -450 EUR/MWh.
+- 2024-06-29 15:45 UTC: SI -1,681.317 MW; imbalance price +400 EUR/MWh.
+- 2026-08-15 09:45 UTC: SI -72.442 MW; imbalance price +3,114.671 EUR/MWh.
+- 2026-04-06 around 11:45–12:45 UTC: several QH at -15,000 EUR/MWh with positive SI; prime candidate for a first deep market-tape explanation.
+
+### Scientific status after first green factory
+- **Mechanism-ready:** post-MARI imbalance/activation/price-component tape; verified JAO Core CNEC/RAM/PTDF endpoint for ex-post congestion analysis.
+- **Prospective PIT only:** live/revised load, wind, solar, NRT balancing, NRT imbalance and NRT capacity vintages until enough history is accumulated.
+- **Still blocked for ex-ante claims:** historical “most recent” forecast revisions; JAO RAM/PTDF features without observed historical publication timestamps; any bid-stack feature before its publication timing is certified.
+- **Edges:** none promoted. No robust/watchlist rule exists yet solely because the first factory is operational.
+
+### Next investigations
+1. Promote health-v2 after CI and rerun against the real artifact.
+2. Progressively backfill verified JAO Final Computation history from recent data toward 08/06/2022 while refreshing recent days every run.
+3. Accumulate NRT vintages and certify field-level availability for the actual decision gates.
+4. Deep-dive 2026-04-06 and 2024-06-29 with full market tape, then add renewable/import/congestion explanatory layers.
+5. Begin regime discovery only on features whose PIT status is proven; use temporal holdout/walk-forward and keep rejected hypotheses in this ledger.
