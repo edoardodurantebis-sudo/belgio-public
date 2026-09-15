@@ -52,6 +52,9 @@ jobs:
           fi
           echo "Factory mode: ${MODE}"
           python scripts/run_factory.py --mode "${MODE}" --strict-core
+      - name: Audit JAO Core CNEC/RAM/PTDF endpoint without guessing
+        if: always()
+        run: python scripts/run_jao_audit.py
       - name: Build reproducible ex-post case registry
         if: always()
         run: python scripts/run_case_studies.py
