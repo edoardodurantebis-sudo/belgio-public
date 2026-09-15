@@ -21,6 +21,33 @@ def year_windows(first: pd.Timestamp, last: pd.Timestamp) -> Iterator[tuple[pd.T
         cursor = nxt
 
 
+def incremental_cursor(spec: SourceSpec, last_delivery: pd.Timestamp, now_utc: pd.Timestamp | None = None) -> pd.Timestamp:
+    """Return a conservative overlap cursor for an existing historical source.
+
+    Mixed forecast/actual datasets often contain future delivery horizons, so
+    their maximum delivery timestamp is not a safe incremental watermark.
+    Outcome-only histories still use a small overlap to catch later corrections.
+    """
+    now = pd.Timestamp.now(tz="UTC") if now_utc is None else pd.Timestamp(now_utc)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    else:
+        now = now.tz_convert("UTC")
+    last = pd.Timestamp(last_delivery)
+    if last.tzinfo is None:
+        last = last.tz_localize("UTC")
+    else:
+        last = last.tz_convert("UTC")
+
+    if spec.pit_status in {"mixed", "candidate_safe_with_vintage"}:
+        anchor = min(last, now)
+        return anchor - pd.Timedelta(days=30)
+    if spec.preserve_vintages:
+        anchor = min(last, now)
+        return anchor - pd.Timedelta(days=7)
+    return min(last, now) - pd.Timedelta(days=2)
+
+
 def select_sources(
     sources: list[SourceSpec],
     *,

@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse, json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -9,20 +10,30 @@ from belgium_public.canonical import canonicalize
 from belgium_public.config import ROOT, SourceSpec, load_registry
 from belgium_public.elia import collect_elia, discover_datetime_bounds
 from belgium_public.health import build_health
-from belgium_public.jao import collect_jao_maxexchanges
-from belgium_public.planning import select_sources, year_windows
+from belgium_public.jao import collect_jao_final_computation, collect_jao_maxexchanges
+from belgium_public.planning import incremental_cursor, select_sources, year_windows
+
+BRUSSELS = ZoneInfo("Europe/Brussels")
+CORE_FB_START = date(2022, 6, 8)
+JAO_BACKFILL_DAYS_PER_RUN = 30
 
 
-def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | None:
+def _delivery_bounds(spec: SourceSpec, canonical_root: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     path = canonical_root / f"{spec.id}.parquet"
     if not path.exists():
-        return None
+        return None, None
     try:
         df = pd.read_parquet(path, columns=["delivery_start_utc"])
     except Exception:
-        return None
+        return None, None
     dt = pd.to_datetime(df["delivery_start_utc"], utc=True, errors="coerce").dropna()
-    return pd.Timestamp(dt.max()) if not dt.empty else None
+    if dt.empty:
+        return None, None
+    return pd.Timestamp(dt.min()), pd.Timestamp(dt.max())
+
+
+def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | None:
+    return _delivery_bounds(spec, canonical_root)[1]
 
 
 def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: Path, mode: str, since_override: str | None) -> dict:
@@ -33,12 +44,17 @@ def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: P
         return {"chunks": 1, "rows_canonical": can["rows"], "strategy": "explicit_incremental", "after": since_override}
 
     if last_local is not None and mode in {"incremental", "all"}:
-        result = collect_elia(spec, raw_root, after=last_local)
+        cursor = incremental_cursor(spec, last_local)
+        result = collect_elia(spec, raw_root, after=cursor)
         can = canonicalize(result, canonical_root)
-        return {"chunks": 1, "rows_canonical": can["rows"], "strategy": "incremental", "after": last_local.isoformat()}
+        return {
+            "chunks": 1,
+            "rows_canonical": can["rows"],
+            "strategy": "overlap_incremental",
+            "after": cursor.isoformat(),
+            "previous_max_delivery_utc": last_local.isoformat(),
+        }
 
-    # Missing canonical history is always bootstrapped in bounded yearly windows,
-    # even if an incremental workflow reached the source for the first time.
     first, last = discover_datetime_bounds(spec)
     chunks = 0
     rows = 0
@@ -57,6 +73,59 @@ def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: P
         "strategy": "yearly_bootstrap",
         "provider_first_utc": first.isoformat(),
         "provider_last_utc": last.isoformat(),
+    }
+
+
+def _utc_to_brussels_day(ts: pd.Timestamp) -> date:
+    return pd.Timestamp(ts).tz_convert(BRUSSELS).date()
+
+
+def _collect_jao_progressive(spec: SourceSpec, raw_root: Path, canonical_root: Path) -> dict:
+    """Refresh recent Core FB data and progressively backfill older history."""
+    first_existing, _ = _delivery_bounds(spec, canonical_root)
+    today = datetime.now(BRUSSELS).date()
+    chunks = 0
+    rows = 0
+    windows: list[dict[str, str]] = []
+
+    if first_existing is None:
+        start_day = max(CORE_FB_START, today - timedelta(days=JAO_BACKFILL_DAYS_PER_RUN))
+        end_day = today
+        result = collect_jao_final_computation(spec, start_day, end_day, raw_root)
+        can = canonicalize(result, canonical_root)
+        chunks += 1
+        rows = can["rows"]
+        windows.append({"start_day": start_day.isoformat(), "end_day_exclusive": end_day.isoformat(), "kind": "initial_recent_backfill"})
+        earliest_after = start_day
+    else:
+        earliest_day = _utc_to_brussels_day(first_existing)
+        if earliest_day > CORE_FB_START:
+            backfill_end = earliest_day
+            backfill_start = max(CORE_FB_START, backfill_end - timedelta(days=JAO_BACKFILL_DAYS_PER_RUN))
+            if backfill_start < backfill_end:
+                result = collect_jao_final_computation(spec, backfill_start, backfill_end, raw_root)
+                can = canonicalize(result, canonical_root)
+                chunks += 1
+                rows = can["rows"]
+                windows.append({"start_day": backfill_start.isoformat(), "end_day_exclusive": backfill_end.isoformat(), "kind": "older_backfill"})
+                earliest_day = backfill_start
+        earliest_after = earliest_day
+
+        recent_start = max(CORE_FB_START, today - timedelta(days=3))
+        if recent_start < today:
+            result = collect_jao_final_computation(spec, recent_start, today, raw_root)
+            can = canonicalize(result, canonical_root)
+            chunks += 1
+            rows = can["rows"]
+            windows.append({"start_day": recent_start.isoformat(), "end_day_exclusive": today.isoformat(), "kind": "recent_refresh"})
+
+    return {
+        "chunks": chunks,
+        "rows_canonical": rows,
+        "strategy": "progressive_daily_backfill",
+        "windows": windows,
+        "target_start_day": CORE_FB_START.isoformat(),
+        "backfill_complete": earliest_after <= CORE_FB_START,
     }
 
 
@@ -89,8 +158,11 @@ def main():
                 result = collect_elia(spec, raw_root)
                 can = canonicalize(result, canonical_root)
                 events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "snapshot"})
+            elif spec.provider == "JAO" and spec.id == "jao_core_final_computation":
+                detail = _collect_jao_progressive(spec, raw_root, canonical_root)
+                events.append({"source_id": spec.id, "status": "PASS", **detail})
             elif spec.provider == "JAO" and spec.id == "jao_core_maxexchanges":
-                result = collect_jao_maxexchanges(spec, date.today() - timedelta(days=2), raw_root)
+                result = collect_jao_maxexchanges(spec, datetime.now(BRUSSELS).date() - timedelta(days=2), raw_root)
                 can = canonicalize(result, canonical_root)
                 events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "canary_day"})
         except Exception as e:
