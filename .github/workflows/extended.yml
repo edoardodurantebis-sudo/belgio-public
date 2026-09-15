@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: belgium-public-data
+  # Serialize all state-writing workflows against the same cumulative artifact.
+  group: belgium-public-data-v2
   cancel-in-progress: false
 
 jobs:
