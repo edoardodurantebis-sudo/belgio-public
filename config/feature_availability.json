@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "policy": "A feature is ex-ante eligible only if its publication/knowledge timestamp is either source-native and validated or captured prospectively by this factory.",
+  "features": [
+    {"feature":"imbalance_price","source":"ods134/ods047","role":"target/outcome","pit":"never_ex_ante"},
+    {"feature":"system_imbalance","source":"ods166/ods168/ods175","role":"target/state","pit":"historical_outcome; nrt vintages prospective"},
+    {"feature":"load_day_ahead","source":"ods001","role":"feature","pit":"candidate_safe_only_for_explicit_day_ahead_label; field-level validation required"},
+    {"feature":"load_most_recent","source":"ods001/ods002","role":"feature","pit":"unsafe historically; prospective snapshots only"},
+    {"feature":"wind_day_ahead_11am","source":"ods031","role":"feature","pit":"candidate_safe by labelled gate; validate methodology changes"},
+    {"feature":"wind_most_recent","source":"ods031/ods086","role":"feature","pit":"unsafe historically; prospective snapshots only"},
+    {"feature":"solar_day_ahead_11am","source":"ods032","role":"feature","pit":"candidate_safe by labelled gate; validate methodology changes"},
+    {"feature":"solar_most_recent","source":"ods032/ods087","role":"feature","pit":"unsafe historically; prospective snapshots only"},
+    {"feature":"physical_cross_border_flow","source":"ods026/ods160","role":"state/outcome","pit":"not assumed ex-ante"},
+    {"feature":"intraday_available_capacity_last_closed_gate","source":"ods013/ods205","role":"feature","pit":"unknown historically; prospective snapshots preferred"},
+    {"feature":"core_max_exchange","source":"JAO","role":"feature","pit":"unknown until publication timing captured/validated"},
+    {"feature":"core_cnec_ram_ptdf","source":"JAO","role":"feature","pit":"blocked until endpoint + publication timing are verified"}
+  ]
+}

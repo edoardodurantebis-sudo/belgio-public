@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+.env
+# large/public data products are workflow artifacts, not source code
+data/raw/**
+data/canonical/**
+!data/raw/.gitkeep
+!data/canonical/.gitkeep
+research/case_studies/*.parquet
+research/case_studies/*.csv
