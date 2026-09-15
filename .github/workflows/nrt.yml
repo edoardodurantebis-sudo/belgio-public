@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: belgium-public-data
+  # All state-writing workflows share one lock so that the latest artifact is
+  # a serial history, never two competing snapshots.
+  group: belgium-public-data-v2
   cancel-in-progress: false
 
 jobs:
