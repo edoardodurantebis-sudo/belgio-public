@@ -58,13 +58,15 @@ def collect_jao_final_computation(
     raw_root: Path,
     *,
     timeout: int = 60,
-    take: int = 5000,
+    take: int = 40000,
     max_pages: int = 200,
 ) -> dict:
     """Collect Core Final Computation for Brussels business days [start_day, end_day).
 
-    The live endpoint is paginated and requires FromUtc/ToUtc. Every HTTP page is
-    preserved as its own raw vintage with the exact response URL and retrieval time.
+    The live endpoint is paginated and requires FromUtc/ToUtc. The official API
+    handbook example uses take=40000; pagination remains explicit if the range
+    contains more rows. Every HTTP page is preserved with exact response URL and
+    retrieval time.
     """
     if end_day <= start_day:
         raise ValueError("end_day must be after start_day")
@@ -148,7 +150,7 @@ def collect_jao_maxexchanges(spec: SourceSpec, day: date, raw_root: Path, timeou
         "FromUtc": business_day_param(day),
         "ToUtc": business_day_param(date.fromordinal(day.toordinal() + 1)),
         "skip": 0,
-        "take": 5000,
+        "take": 40000,
     }
     try:
         response = requests.get(spec.endpoint, params=params, timeout=timeout, headers={"User-Agent": "belgio-public/0.3"})
