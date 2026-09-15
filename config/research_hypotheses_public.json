@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "policy": "This registry contains only generic research hypotheses that must be tested independently with public data. No private source material, internal code, desk P&L, screenshots, paths, execution conventions, or proprietary thresholds are stored here.",
+  "hypotheses": [
+    {
+      "id": "H_BE_PIT_FORECAST_VINTAGE",
+      "title": "Forecast vintage quality matters more than final historical labels",
+      "question": "Do point-in-time load, wind and solar forecast revisions explain subsequent Belgian system imbalance better than final historical forecast labels?",
+      "required_public_sources": ["ods001", "ods002", "ods031", "ods086", "ods032", "ods087", "ods134"],
+      "time_controls": ["gate-specific knowledge timestamp", "prospective vintage capture", "no final-vintage leakage"],
+      "status": "prospective_data_building",
+      "promotion_rule": "Only test ex-ante after feature availability is certified at the relevant commercial gate."
+    },
+    {
+      "id": "H_BE_RESIDUAL_LOAD_QH_RAMP",
+      "title": "Intra-hour residual-load shape contains quarter-hour information",
+      "question": "Within an hour, does the deviation of quarter-hour residual load from the hourly mean explain the relative shape of Belgian quarter-hour prices and/or subsequent imbalance economics?",
+      "formula": "residual_load = load_forecast - solar_forecast - wind_forecast; spread_qh = residual_load_qh - mean_hour(residual_load)",
+      "required_public_sources": ["ods001", "ods031", "ods032", "public_Belgian_DA_QH_prices", "ods134"],
+      "time_controls": ["forecast fields must be PIT-safe", "DA QH price source must be public and timestamped", "separate structural regimes"],
+      "status": "blocked_missing_certified_DA_QH_price_source",
+      "promotion_rule": "Evaluate long and short legs separately with walk-forward and post-regime holdout."
+    },
+    {
+      "id": "H_BE_QH_MARKET_REGIME_BREAK",
+      "title": "Quarter-hourly market design changes the useful signal set",
+      "question": "Did the introduction of quarter-hourly day-ahead pricing materially change the stability of hourly versus quarter-hourly relationships?",
+      "required_public_sources": ["official_market_design_documentation", "public_Belgian_DA_QH_prices", "ods134"],
+      "time_controls": ["officially verify go-live date", "never pool pre/post without separate estimates"],
+      "status": "needs_official_breakpoint_verification",
+      "promotion_rule": "All discovery results must report pre/post performance separately."
+    },
+    {
+      "id": "H_BE_DIRECTIONAL_STRENGTH",
+      "title": "Recent directional consistency is more informative than a simple mean",
+      "question": "For lagged historical imbalance or spread features, does sign consistency times magnitude outperform a simple rolling mean as a regime indicator?",
+      "formula": "directionality = abs(sum(x))/sum(abs(x)); intensity = abs(mean(x)); score = directionality * intensity",
+      "required_public_sources": ["ods134", "public_Belgian_DA_or_ID_reference_price"],
+      "time_controls": ["use closed historical windows only", "exclude current delivery day and unavailable recent settlements"],
+      "status": "research_ready_for_outcome_regime_analysis",
+      "promotion_rule": "No fixed threshold may be promoted without walk-forward stability and multiplicity control."
+    },
+    {
+      "id": "H_BE_CROSS_BORDER_AMPLIFIER",
+      "title": "Cross-border tightness amplifies local imbalance severity conditionally",
+      "question": "Conditional on Belgian system direction, do low import/export capability, RAM/CNEC tightness or saturated borders amplify imbalance-price severity?",
+      "required_public_sources": ["ods013", "ods205", "ods026", "ods160", "jao_core_final_computation", "ods134"],
+      "time_controls": ["historical ATC/JAO knowledge timing must be certified for ex-ante use", "ex-post mechanism analysis may proceed earlier"],
+      "status": "mechanism_ready_expost_pit_blocked_exante",
+      "promotion_rule": "Treat capacity as a conditional amplifier, not an unconditional direction signal."
+    },
+    {
+      "id": "H_BE_RENEWABLE_SURPLUS_REGIME",
+      "title": "Renewable forecast error is regime-dependent rather than a permanent directional rule",
+      "question": "Are large positive solar/wind surprises associated with long-system or low-price outcomes only under specific load, season, hour and cross-border conditions?",
+      "required_public_sources": ["ods031", "ods032", "ods001", "ods026", "jao_core_final_computation", "ods134"],
+      "time_controls": ["PIT-safe forecast baseline", "season/hour stratification", "structural-break controls"],
+      "status": "mechanism_ready_expost_pit_partial",
+      "promotion_rule": "Reject any unconditional renewable-surprise rule that is unstable by regime."
+    },
+    {
+      "id": "H_BE_TEMPERATURE_LOAD_SENSITIVITY",
+      "title": "Temperature conditions the load forecast error distribution",
+      "question": "Does temperature deviation from a seasonal reference explain Belgian load error and, conditionally, system imbalance?",
+      "required_public_sources": ["ods001", "official_public_weather_forecast_and_actual", "ods134"],
+      "time_controls": ["weather forecast vintage required", "separate summer/winter response"],
+      "status": "blocked_public_weather_vintage_source_needed",
+      "promotion_rule": "Must demonstrate incremental value beyond load forecast itself."
+    },
+    {
+      "id": "H_BE_SPATIAL_PV_CLOUD",
+      "title": "Spatial cloud location matters more than country-average cloud cover",
+      "question": "Can public high-resolution cloud/radiation data weighted by Belgian PV capacity geography improve intraday solar-error estimates?",
+      "required_public_sources": ["public_PV_capacity_geography", "public_cloud_or_radiation_grid", "ods032", "ods087"],
+      "time_controls": ["publication latency", "grid timestamp", "prospective validation"],
+      "status": "source_discovery_needed",
+      "promotion_rule": "Validate MW-error reduction prospectively before using any trading interpretation."
+    },
+    {
+      "id": "H_BE_ENTRY_PRICE_VS_IMBALANCE",
+      "title": "Physical direction and trade economics are separate questions",
+      "question": "Even when system direction is predictable, does the available DA/ID entry price leave enough spread versus subsequent imbalance to create a robust edge?",
+      "required_public_sources": ["public_Belgian_DA_prices", "public_Belgian_ID_prices_if_available", "ods134"],
+      "time_controls": ["entry price known before decision", "transaction-cost sensitivity", "no target-derived sizing"],
+      "status": "blocked_public_entry_price_history_needed",
+      "promotion_rule": "A direction hit-rate alone can never qualify a rule as robust."
+    }
+  ]
+}
