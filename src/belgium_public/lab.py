@@ -1,8 +1,11 @@
 from __future__ import annotations
 import json
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
+
+from .config import ROOT
 
 
 def _load_json(path: Path) -> dict:
@@ -12,13 +15,37 @@ def _load_json(path: Path) -> dict:
         return {}
 
 
+def _hypothesis_summary() -> dict:
+    registry = _load_json(ROOT / "config" / "research_hypotheses_public.json")
+    hypotheses = registry.get("hypotheses", []) if isinstance(registry, dict) else []
+    counts = Counter(str(h.get("status", "unknown")) for h in hypotheses if isinstance(h, dict))
+    return {
+        "registry": "config/research_hypotheses_public.json",
+        "count": len(hypotheses),
+        "status_counts": dict(sorted(counts.items())),
+        "policy": registry.get("policy"),
+        "items": [
+            {
+                "id": h.get("id"),
+                "title": h.get("title"),
+                "status": h.get("status"),
+                "promotion_rule": h.get("promotion_rule"),
+            }
+            for h in hypotheses
+            if isinstance(h, dict)
+        ],
+    }
+
+
 def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
     health = _load_json(health_path)
+    hypotheses = _hypothesis_summary()
     if health.get("overall_status") != "PASS":
         payload = {
             "status": "BLOCKED",
             "reason": "DATA_HEALTH core gate is not PASS",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "research_hypotheses": hypotheses,
             "robust": [],
             "watchlist": [],
             "rejected": [],
@@ -80,6 +107,7 @@ def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
     payload = {
         "status": "PASS_NO_EDGE_PROMOTED",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "research_hypotheses": hypotheses,
         "mechanisms": mechanisms,
         "robust": [],
         "watchlist": [],
