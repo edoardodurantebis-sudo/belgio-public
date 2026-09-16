@@ -15,15 +15,13 @@ on:
         required: true
         default: incremental
   schedule:
-    - cron: '27 03 * * *'
+    - cron: '27 */4 * * *'
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  # v2 deliberately detaches the hardened pipeline from the obsolete first
-  # bootstrap, whose concurrency contract cannot be changed retroactively.
   group: belgium-public-data-v2
   cancel-in-progress: true
 
