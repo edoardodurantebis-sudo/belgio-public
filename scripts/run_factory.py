@@ -16,7 +16,7 @@ from belgium_public.planning import incremental_cursor, select_sources, year_win
 
 BRUSSELS = ZoneInfo("Europe/Brussels")
 CORE_FB_START = date(2022, 6, 8)
-JAO_BACKFILL_DAYS_PER_RUN = 30
+JAO_BACKFILL_DAYS_PER_RUN = 12
 INCREMENTAL_ELIA_TIMEOUT = (15, 60)
 MAX_INCREMENTAL_WORKERS = 4
 
@@ -169,7 +169,6 @@ def main():
     canonical_root = ROOT / "data" / "canonical"
     events: list[dict] = []
     failures: list[dict] = []
-    spec_by_id = {s.id: s for s in selected}
 
     # Incremental sources are independent by source id (separate raw/canonical paths),
     # so bounded concurrency prevents one slow provider response from consuming the
@@ -209,6 +208,7 @@ def main():
         "execution": {
             "incremental_workers": min(MAX_INCREMENTAL_WORKERS, len(selected)) if args.mode in {"incremental", "all"} else 1,
             "incremental_elia_timeout_seconds": list(INCREMENTAL_ELIA_TIMEOUT),
+            "jao_backfill_days_per_run": JAO_BACKFILL_DAYS_PER_RUN,
         },
     }
     (ROOT / "state").mkdir(exist_ok=True)
