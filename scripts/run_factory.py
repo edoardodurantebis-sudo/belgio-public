@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse, json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,6 +17,8 @@ from belgium_public.planning import incremental_cursor, select_sources, year_win
 BRUSSELS = ZoneInfo("Europe/Brussels")
 CORE_FB_START = date(2022, 6, 8)
 JAO_BACKFILL_DAYS_PER_RUN = 30
+INCREMENTAL_ELIA_TIMEOUT = (15, 60)
+MAX_INCREMENTAL_WORKERS = 4
 
 
 def _delivery_bounds(spec: SourceSpec, canonical_root: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
@@ -39,13 +42,13 @@ def _last_delivery(spec: SourceSpec, canonical_root: Path) -> pd.Timestamp | Non
 def _collect_historical_elia(spec: SourceSpec, raw_root: Path, canonical_root: Path, mode: str, since_override: str | None) -> dict:
     last_local = _last_delivery(spec, canonical_root)
     if since_override:
-        result = collect_elia(spec, raw_root, after=since_override)
+        result = collect_elia(spec, raw_root, after=since_override, timeout=INCREMENTAL_ELIA_TIMEOUT)
         can = canonicalize(result, canonical_root)
         return {"chunks": 1, "rows_canonical": can["rows"], "strategy": "explicit_incremental", "after": since_override}
 
     if last_local is not None and mode in {"incremental", "all"}:
         cursor = incremental_cursor(spec, last_local)
-        result = collect_elia(spec, raw_root, after=cursor)
+        result = collect_elia(spec, raw_root, after=cursor, timeout=INCREMENTAL_ELIA_TIMEOUT)
         can = canonicalize(result, canonical_root)
         return {
             "chunks": 1,
@@ -129,6 +132,24 @@ def _collect_jao_progressive(spec: SourceSpec, raw_root: Path, canonical_root: P
     }
 
 
+def _collect_one(spec: SourceSpec, raw_root: Path, canonical_root: Path, mode: str, since: str | None) -> dict:
+    if spec.provider == "Elia" and spec.mode == "historical":
+        detail = _collect_historical_elia(spec, raw_root, canonical_root, mode, since)
+        return {"source_id": spec.id, "status": "PASS", **detail}
+    if spec.provider == "Elia" and spec.mode == "snapshot":
+        result = collect_elia(spec, raw_root)
+        can = canonicalize(result, canonical_root)
+        return {"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "snapshot"}
+    if spec.provider == "JAO" and spec.id == "jao_core_final_computation":
+        detail = _collect_jao_progressive(spec, raw_root, canonical_root)
+        return {"source_id": spec.id, "status": "PASS", **detail}
+    if spec.provider == "JAO" and spec.id == "jao_core_maxexchanges":
+        result = collect_jao_maxexchanges(spec, datetime.now(BRUSSELS).date() - timedelta(days=2), raw_root)
+        can = canonicalize(result, canonical_root)
+        return {"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "canary_day"}
+    return {"source_id": spec.id, "status": "SKIP", "strategy": "unsupported_source_mode"}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["bootstrap", "incremental", "nrt", "all"], default="incremental")
@@ -148,26 +169,33 @@ def main():
     canonical_root = ROOT / "data" / "canonical"
     events: list[dict] = []
     failures: list[dict] = []
+    spec_by_id = {s.id: s for s in selected}
 
-    for spec in selected:
-        try:
-            if spec.provider == "Elia" and spec.mode == "historical":
-                detail = _collect_historical_elia(spec, raw_root, canonical_root, args.mode, args.since)
-                events.append({"source_id": spec.id, "status": "PASS", **detail})
-            elif spec.provider == "Elia" and spec.mode == "snapshot":
-                result = collect_elia(spec, raw_root)
-                can = canonicalize(result, canonical_root)
-                events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "snapshot"})
-            elif spec.provider == "JAO" and spec.id == "jao_core_final_computation":
-                detail = _collect_jao_progressive(spec, raw_root, canonical_root)
-                events.append({"source_id": spec.id, "status": "PASS", **detail})
-            elif spec.provider == "JAO" and spec.id == "jao_core_maxexchanges":
-                result = collect_jao_maxexchanges(spec, datetime.now(BRUSSELS).date() - timedelta(days=2), raw_root)
-                can = canonicalize(result, canonical_root)
-                events.append({"source_id": spec.id, "status": "PASS", "rows_canonical": can["rows"], "strategy": "canary_day"})
-        except Exception as e:
-            failures.append({"source_id": spec.id, "tier": spec.tier, "status": "FAIL", "error": repr(e)})
+    # Incremental sources are independent by source id (separate raw/canonical paths),
+    # so bounded concurrency prevents one slow provider response from consuming the
+    # whole hosted-runner lifetime. Bootstrap remains sequential and conservative.
+    if args.mode in {"incremental", "all"} and len(selected) > 1:
+        workers = min(MAX_INCREMENTAL_WORKERS, len(selected))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="be-source") as pool:
+            future_map = {
+                pool.submit(_collect_one, spec, raw_root, canonical_root, args.mode, args.since): spec
+                for spec in selected
+            }
+            for future in as_completed(future_map):
+                spec = future_map[future]
+                try:
+                    events.append(future.result())
+                except Exception as e:
+                    failures.append({"source_id": spec.id, "tier": spec.tier, "status": "FAIL", "error": repr(e)})
+    else:
+        for spec in selected:
+            try:
+                events.append(_collect_one(spec, raw_root, canonical_root, args.mode, args.since))
+            except Exception as e:
+                failures.append({"source_id": spec.id, "tier": spec.tier, "status": "FAIL", "error": repr(e)})
 
+    events.sort(key=lambda x: x.get("source_id", ""))
+    failures.sort(key=lambda x: x.get("source_id", ""))
     health = build_health(sources, canonical_root, ROOT / "state" / "DATA_HEALTH.json")
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -178,6 +206,10 @@ def main():
         "health": health["overall_status"],
         "health_gates": health.get("gates", {}),
         "structural_breaks": registry.get("structural_breaks", []),
+        "execution": {
+            "incremental_workers": min(MAX_INCREMENTAL_WORKERS, len(selected)) if args.mode in {"incremental", "all"} else 1,
+            "incremental_elia_timeout_seconds": list(INCREMENTAL_ELIA_TIMEOUT),
+        },
     }
     (ROOT / "state").mkdir(exist_ok=True)
     (ROOT / "state" / "RUN_MANIFEST.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
