@@ -1,4 +1,11 @@
-from belgium_public.jao import JAOCollectorError, _rows_from_payload, _validate_final_computation_rows
+from datetime import date
+
+from belgium_public.jao import (
+    JAOCollectorError,
+    _range_windows,
+    _rows_from_payload,
+    _validate_final_computation_rows,
+)
 
 
 def test_rows_from_payload_accepts_list_and_common_wrappers():
@@ -19,3 +26,12 @@ def test_final_computation_schema_requires_ram_ptdf_and_cnec():
         pass
     else:
         raise AssertionError("missing PTDF must fail closed")
+
+
+def test_range_windows_are_one_business_day_each():
+    windows = list(_range_windows(date(2026, 9, 10), date(2026, 9, 13)))
+    assert windows == [
+        (date(2026, 9, 10), date(2026, 9, 11)),
+        (date(2026, 9, 11), date(2026, 9, 12)),
+        (date(2026, 9, 12), date(2026, 9, 13)),
+    ]
