@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, asdict
-from itertools import combinations
 from pathlib import Path
 from typing import Iterable
 
@@ -126,6 +125,11 @@ def summarize_pnl(rows: pd.DataFrame, pnl_col: str = "gross_pnl_1mw_eur") -> dic
 
 
 def generate_atoms(train: pd.DataFrame, feature_registry: pd.DataFrame, quantiles=(0.05, 0.10, 0.20, 0.33, 0.67, 0.80, 0.90, 0.95)) -> list[Atom]:
+    """Generate thresholds only from the training slice.
+
+    Small deterministic categorical features such as weekend flags must not be
+    silently excluded simply because they have fewer than eight unique values.
+    """
     atoms: list[Atom] = []
     for _, row in feature_registry.iterrows():
         feature = str(row["column_name"])
@@ -133,10 +137,23 @@ def generate_atoms(train: pd.DataFrame, feature_registry: pd.DataFrame, quantile
         if feature not in train:
             continue
         z = num(train[feature]).dropna()
-        if len(z) < 120 or z.nunique() < 8:
+        nunique = int(z.nunique())
+        if len(z) < 120 or nunique < 2:
             continue
-        q = z.quantile(list(quantiles))
+
         seen: set[tuple[str, float]] = set()
+        if nunique <= 6:
+            vals = sorted(float(v) for v in z.unique() if np.isfinite(v))
+            for i in range(len(vals) - 1):
+                thr = (vals[i] + vals[i + 1]) / 2.0
+                for op, label in (("<=", f"LE_{vals[i]:g}"), (">=", f"GE_{vals[i + 1]:g}")):
+                    key = (op, round(thr, 10))
+                    if key not in seen:
+                        seen.add(key)
+                        atoms.append(Atom(feature, op, thr, label, family))
+            continue
+
+        q = z.quantile(list(quantiles))
         for qq in quantiles:
             op = "<=" if qq < 0.5 else ">="
             thr = float(q.loc[qq])
@@ -196,7 +213,7 @@ def discover(train: pd.DataFrame, feature_registry: pd.DataFrame, max_depth: int
         emit(aa, st, sc)
 
     anchor_atoms = [x[1][0] for x in singles[: min(len(singles), 160)]]
-    for depth in range(2, max_depth + 1):
+    for _depth in range(2, max_depth + 1):
         nxt = []
         for _, base, _ in beam:
             for a in anchor_atoms:
@@ -269,6 +286,11 @@ def run_profit_lab(panel_path: Path, feature_registry_path: Path, out_path: Path
         payload = {"status": "BLOCKED_MISSING_PROFIT_PANEL", "reason": "Certified entry-price + imbalance panel not available yet", "candidates": []}
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
+    if not feature_registry_path.exists():
+        payload = {"status": "BLOCKED_MISSING_FEATURE_REGISTRY", "reason": str(feature_registry_path), "candidates": []}
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
     panel = pd.read_parquet(panel_path)
     required = {"delivery_start_utc", "entry_price", "imbalance_price", "system_view", "gross_pnl_1mw_eur"}
     missing = sorted(required - set(panel.columns))
@@ -276,18 +298,34 @@ def run_profit_lab(panel_path: Path, feature_registry_path: Path, out_path: Path
         payload = {"status": "BLOCKED_BAD_PROFIT_PANEL", "missing": missing, "candidates": []}
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
+
     reg = pd.read_csv(feature_registry_path)
     if "pit_status" in reg:
         reg = reg[reg["pit_status"].astype(str).str.upper().eq("CERTIFIED")]
     ts = pd.to_datetime(panel["delivery_start_utc"], utc=True, errors="coerce")
-    train = panel.loc[ts < pd.Timestamp(holdout_from, tz="UTC")].copy()
+    split = pd.Timestamp(holdout_from, tz="UTC")
+    train = panel.loc[ts < split].copy()
+    holdout_rows = int((ts >= split).sum())
     cands = discover(train, reg)
     vals = validate(panel, cands, holdout_from)
-    vals.sort(key=lambda r: (r["machine_status"] != "REVIEW_READY", -float(r.get("oos_total_pnl_1mw_eur", -1e18))))
+
+    def _sort_pnl(r: dict) -> float:
+        try:
+            v = float(r.get("oos_total_pnl_1mw_eur", -1e18))
+            return v if np.isfinite(v) else -1e18
+        except Exception:
+            return -1e18
+
+    vals.sort(key=lambda r: (r["machine_status"] != "REVIEW_READY", -_sort_pnl(r)))
+    views = sorted(set(panel["system_view"].dropna().astype(str)))
     payload = {
         "status": "PASS" if vals else "PASS_NO_CANDIDATES",
         "objective": "DIRECT_GROSS_PNL_ENTRY_TO_IMBALANCE_PT15",
         "holdout_from": holdout_from,
+        "system_views": views,
+        "train_rows": int(len(train)),
+        "holdout_rows": holdout_rows,
+        "eligible_feature_count": int(len(reg)),
         "candidate_count": len(vals),
         "review_ready_count": sum(r["machine_status"] == "REVIEW_READY" for r in vals),
         "candidates": vals[:200],
