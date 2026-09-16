@@ -12,7 +12,10 @@ from .config import SourceSpec
 from .provenance import save_raw_vintage, utc_now
 
 BRUSSELS = ZoneInfo("Europe/Brussels")
-JAO_MAX_RANGE_DAYS = 2
+# The live endpoint reports a nominal two-day cap, but a request spanning two
+# Brussels business days can still be rejected at boundary/DST semantics.
+# One business day per HTTP range is cheap, deterministic and fail-safe.
+JAO_MAX_RANGE_DAYS = 1
 
 
 class JAOCollectorError(RuntimeError):
@@ -53,7 +56,7 @@ def _validate_final_computation_rows(rows: list[dict]) -> None:
 
 
 def _range_windows(start_day: date, end_day: date):
-    """Yield API-safe [start, end) windows; JAO currently caps ranges at two days."""
+    """Yield conservative API-safe [start, end) one-business-day windows."""
     cur = start_day
     while cur < end_day:
         nxt = min(end_day, cur + timedelta(days=JAO_MAX_RANGE_DAYS))
@@ -73,8 +76,8 @@ def collect_jao_final_computation(
 ) -> dict:
     """Collect Core Final Computation for Brussels business days [start_day, end_day).
 
-    JAO's current Final Computation endpoint rejects ranges greater than two days,
-    so larger historical requests are split deterministically into API-safe windows.
+    Requests are split into one-business-day ranges. This is deliberately more
+    conservative than the nominal API cap and avoids boundary/DST range errors.
     Each HTTP page is preserved with its exact response URL and retrieval time.
     """
     if end_day <= start_day:
@@ -102,7 +105,7 @@ def collect_jao_final_computation(
                     spec.endpoint,
                     params=params,
                     timeout=timeout,
-                    headers={"User-Agent": "belgio-public/0.4"},
+                    headers={"User-Agent": "belgio-public/0.6"},
                 )
             except requests.RequestException as exc:
                 raise JAOCollectorError(f"network error window={window_start}:{window_end}: {exc}") from exc
@@ -146,8 +149,6 @@ def collect_jao_final_computation(
                 f"pagination exceeded max_pages={max_pages} window={window_start}:{window_end}"
             )
 
-        # A historical two-day window may legitimately contain no rows. Keep
-        # progressing, but require at least one row across the full request.
         if not window_had_rows:
             continue
 
@@ -184,7 +185,7 @@ def collect_jao_maxexchanges(spec: SourceSpec, day: date, raw_root: Path, timeou
         "take": 40000,
     }
     try:
-        response = requests.get(spec.endpoint, params=params, timeout=timeout, headers={"User-Agent": "belgio-public/0.4"})
+        response = requests.get(spec.endpoint, params=params, timeout=timeout, headers={"User-Agent": "belgio-public/0.6"})
     except requests.RequestException as exc:
         raise JAOCollectorError(f"network error: {exc}") from exc
     if response.status_code != 200:
