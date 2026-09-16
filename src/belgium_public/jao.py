@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import random
+import time as sleep_time
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,6 +18,7 @@ BRUSSELS = ZoneInfo("Europe/Brussels")
 # Brussels business days can still be rejected at boundary/DST semantics.
 # One business day per HTTP range is cheap, deterministic and fail-safe.
 JAO_MAX_RANGE_DAYS = 1
+JAO_RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 
 
 class JAOCollectorError(RuntimeError):
@@ -64,6 +67,45 @@ def _range_windows(start_day: date, end_day: date):
         cur = nxt
 
 
+def _request_with_retry(
+    url: str,
+    *,
+    params: dict,
+    timeout: int,
+    retries: int = 4,
+    base_sleep_seconds: float = 1.0,
+    request_get=None,
+):
+    """GET JAO with bounded retry on transient transport/server failures only.
+
+    Hard 4xx responses are returned immediately so schema/range/auth defects do
+    not get hidden behind retries. Transport exceptions and explicitly
+    retryable HTTP statuses use exponential backoff with small jitter.
+    """
+    getter = request_get or requests.get
+    last_exc: Exception | None = None
+    last_response = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            response = getter(
+                url,
+                params=params,
+                timeout=timeout,
+                headers={"User-Agent": "belgio-public/0.9"},
+            )
+            last_response = response
+            if response.status_code not in JAO_RETRYABLE_HTTP:
+                return response, attempt
+        except requests.RequestException as exc:
+            last_exc = exc
+        if attempt < max(1, retries):
+            delay = base_sleep_seconds * (2 ** (attempt - 1)) + random.uniform(0.0, min(0.25, base_sleep_seconds))
+            sleep_time.sleep(delay)
+    if last_response is not None:
+        return last_response, max(1, retries)
+    raise JAOCollectorError(f"network error after retries={max(1, retries)}: {last_exc}") from last_exc
+
+
 def collect_jao_final_computation(
     spec: SourceSpec,
     start_day: date,
@@ -73,12 +115,15 @@ def collect_jao_final_computation(
     timeout: int = 60,
     take: int = 40000,
     max_pages: int = 200,
+    retries: int = 4,
 ) -> dict:
     """Collect Core Final Computation for Brussels business days [start_day, end_day).
 
     Requests are split into one-business-day ranges. This is deliberately more
     conservative than the nominal API cap and avoids boundary/DST range errors.
-    Each HTTP page is preserved with its exact response URL and retrieval time.
+    Each page is preserved with its exact response URL and retrieval time.
+    Transient transport and server failures are retried without weakening any
+    content/schema validation.
     """
     if end_day <= start_day:
         raise ValueError("end_day must be after start_day")
@@ -87,6 +132,7 @@ def collect_jao_final_computation(
     raw_paths: list[str] = []
     meta_paths: list[str] = []
     request_urls: list[str] = []
+    retry_attempts: list[int] = []
     last_retrieved = None
     window_count = 0
 
@@ -101,14 +147,15 @@ def collect_jao_final_computation(
         for page in range(max_pages):
             params = {**base_params, "skip": page * take, "take": take}
             try:
-                response = requests.get(
+                response, attempts = _request_with_retry(
                     spec.endpoint,
                     params=params,
                     timeout=timeout,
-                    headers={"User-Agent": "belgio-public/0.6"},
+                    retries=retries,
                 )
-            except requests.RequestException as exc:
+            except JAOCollectorError as exc:
                 raise JAOCollectorError(f"network error window={window_start}:{window_end}: {exc}") from exc
+            retry_attempts.append(attempts)
             if response.status_code != 200:
                 raise JAOCollectorError(
                     f"HTTP {response.status_code} window={window_start}:{window_end}: {response.text[:500]}"
@@ -172,10 +219,19 @@ def collect_jao_final_computation(
         "meta_paths": meta_paths,
         "request_urls": request_urls,
         "api_safe_windows": window_count,
+        "http_request_count": len(retry_attempts),
+        "http_retry_extra_attempts": int(sum(max(0, n - 1) for n in retry_attempts)),
+        "max_attempts_for_one_request": int(max(retry_attempts) if retry_attempts else 0),
     }
 
 
-def collect_jao_maxexchanges(spec: SourceSpec, day: date, raw_root: Path, timeout: int = 60) -> dict:
+def collect_jao_maxexchanges(
+    spec: SourceSpec,
+    day: date,
+    raw_root: Path,
+    timeout: int = 60,
+    retries: int = 4,
+) -> dict:
     """Legacy compatibility collector using the modern FromUtc/ToUtc contract."""
     retrieved = utc_now()
     params = {
@@ -184,10 +240,12 @@ def collect_jao_maxexchanges(spec: SourceSpec, day: date, raw_root: Path, timeou
         "skip": 0,
         "take": 40000,
     }
-    try:
-        response = requests.get(spec.endpoint, params=params, timeout=timeout, headers={"User-Agent": "belgio-public/0.6"})
-    except requests.RequestException as exc:
-        raise JAOCollectorError(f"network error: {exc}") from exc
+    response, attempts = _request_with_retry(
+        spec.endpoint,
+        params=params,
+        timeout=timeout,
+        retries=retries,
+    )
     if response.status_code != 200:
         raise JAOCollectorError(f"HTTP {response.status_code}: {response.text[:300]}")
     try:
@@ -214,4 +272,5 @@ def collect_jao_maxexchanges(spec: SourceSpec, day: date, raw_root: Path, timeou
         "url": response.url,
         "raw_path": raw,
         "meta_path": meta,
+        "http_attempts": attempts,
     }
