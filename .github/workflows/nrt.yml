@@ -1,5 +1,9 @@
 name: Belgium Public NRT Vintage Capture
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/nrt.yml'
   workflow_dispatch:
   schedule:
     - cron: '3,18,33,48 * * * *'
