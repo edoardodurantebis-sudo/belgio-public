@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  # All state-writing workflows share one lock so that the latest artifact is
-  # a serial history, never two competing snapshots.
+  # Historical and NRT state writers share one lock. NRT never cancels a
+  # running historical factory; at most the newest pending snapshot survives.
   group: belgium-public-data-v2
   cancel-in-progress: false
 
@@ -25,17 +25,34 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
       - run: python -m pip install -e .
-      - name: Restore cumulative data state
+      - name: Restore certified cumulative data state
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/restore_latest_state.sh
       - name: Capture public near-real-time vintages
-        run: python scripts/run_factory.py --mode nrt
+        run: python scripts/run_factory.py --mode nrt --strict-core
       - name: Re-evaluate lab gate without promoting unproven edges
-        if: always()
         run: python scripts/run_lab.py
-      - name: Upload cumulative public-data state
-        if: always()
+      - name: Certify NRT state before persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s state/RUN_MANIFEST.json
+          test -d data/canonical
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          m=json.loads(Path('state/RUN_MANIFEST.json').read_text())
+          if m.get('mode') != 'nrt':
+              raise SystemExit(f"UNEXPECTED_MODE:{m.get('mode')}")
+          if not m.get('selected_sources'):
+              raise SystemExit('NO_SELECTED_NRT_SOURCES')
+          bad=[f for f in m.get('failures', []) if f.get('tier') in {'core','core_pre_mari'}]
+          if bad:
+              raise SystemExit(f'CORE_NRT_FAILURES_PRESENT:{bad}')
+          print('NRT_STATE_CERTIFIED', m.get('health'), len(m.get('selected_sources', [])))
+          PY
+      - name: Upload certified cumulative public-data state
         uses: actions/upload-artifact@v4
         with:
           name: belgium-public-state
@@ -44,5 +61,15 @@ jobs:
             data/canonical
             state
             research
-          retention-days: 30
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload NRT failure diagnostics only
+        if: ${{ failure() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: belgium-public-nrt-failure-${{ github.run_id }}
+          path: |
+            state
+            research
+          retention-days: 14
           if-no-files-found: warn
