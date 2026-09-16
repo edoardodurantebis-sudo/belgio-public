@@ -53,22 +53,22 @@ jobs:
           echo "Factory mode: ${MODE}"
           python scripts/run_factory.py --mode "${MODE}" --strict-core
       - name: Audit JAO Core CNEC/RAM/PTDF endpoint without guessing
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/run_jao_audit.py
       - name: Build reproducible ex-post case registry
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/run_case_studies.py
       - name: Run market-lab scientific gate
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/run_lab.py
       - name: Build public DA profit workspace
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/build_profit_workspace.py
       - name: Run profit-first economic discovery gate
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/run_profit_lab.py
       - name: Upload cumulative public-data state
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: belgium-public-state
