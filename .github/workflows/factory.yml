@@ -43,6 +43,7 @@ jobs:
       - name: Run historical collector + canonical + health
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             MODE="${{ github.event.inputs.mode }}"
           elif [[ "${BELGIUM_STATE_RESTORED:-0}" == "1" ]]; then
@@ -50,25 +51,38 @@ jobs:
           else
             MODE="bootstrap"
           fi
+          echo "BELGIUM_FACTORY_MODE=${MODE}" >> "$GITHUB_ENV"
           echo "Factory mode: ${MODE}"
           python scripts/run_factory.py --mode "${MODE}" --strict-core
       - name: Audit JAO Core CNEC/RAM/PTDF endpoint without guessing
-        if: ${{ !cancelled() }}
         run: python scripts/run_jao_audit.py
       - name: Build reproducible ex-post case registry
-        if: ${{ !cancelled() }}
         run: python scripts/run_case_studies.py
       - name: Run market-lab scientific gate
-        if: ${{ !cancelled() }}
         run: python scripts/run_lab.py
       - name: Build public DA profit workspace
-        if: ${{ !cancelled() }}
         run: python scripts/build_profit_workspace.py
       - name: Run profit-first economic discovery gate
-        if: ${{ !cancelled() }}
         run: python scripts/run_profit_lab.py
-      - name: Upload cumulative public-data state
-        if: ${{ !cancelled() }}
+      - name: Certify canonical state before persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s state/RUN_MANIFEST.json
+          test -d data/canonical
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('state/RUN_MANIFEST.json')
+          m=json.loads(p.read_text())
+          bad=[f for f in m.get('failures', []) if f.get('tier') in {'core','core_pre_mari'}]
+          if bad:
+              raise SystemExit(f'CORE_FAILURES_PRESENT:{bad}')
+          if not m.get('selected_sources'):
+              raise SystemExit('NO_SELECTED_SOURCES')
+          print('STATE_CERTIFIED', m.get('mode'), m.get('health'), len(m.get('selected_sources', [])))
+          PY
+      - name: Upload certified cumulative public-data state
         uses: actions/upload-artifact@v4
         with:
           name: belgium-public-state
@@ -77,5 +91,15 @@ jobs:
             data/canonical
             state
             research
-          retention-days: 30
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload failure diagnostics only
+        if: ${{ failure() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: belgium-public-failure-${{ github.run_id }}
+          path: |
+            state
+            research
+          retention-days: 14
           if-no-files-found: warn
