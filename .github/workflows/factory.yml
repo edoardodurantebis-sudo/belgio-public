@@ -63,6 +63,12 @@ jobs:
       - name: Run market-lab scientific gate
         if: always()
         run: python scripts/run_lab.py
+      - name: Build public DA profit workspace
+        if: always()
+        run: python scripts/build_profit_workspace.py
+      - name: Run profit-first economic discovery gate
+        if: always()
+        run: python scripts/run_profit_lab.py
       - name: Upload cumulative public-data state
         if: always()
         uses: actions/upload-artifact@v4
