@@ -1,0 +1,100 @@
+name: Belgium Recovery Watchdog
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "Belgium Public Historical Factory"
+      - "Belgium Public NRT Vintage Capture"
+    types: [completed]
+  schedule:
+    - cron: '12,42 * * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: belgium-recovery-watchdog
+  cancel-in-progress: true
+
+jobs:
+  retry-failed-run:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retry failed Belgium job with a hard cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "failed_run=${RUN_ID} attempt=${RUN_ATTEMPT}"
+          if (( RUN_ATTEMPT >= 3 )); then
+            echo "RETRY_CAP_REACHED — preserve last certified state; future scheduled runs continue."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/rerun-failed-jobs"
+          echo "AUTOMATIC_RETRY_REQUESTED"
+
+  heartbeat-rescue:
+    if: ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rescue stale historical factory and NRT capture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_and_dispatch () {
+            local workflow="$1"
+            local max_age="$2"
+            local label="$3"
+            local tmp="/tmp/${label}.json"
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?per_page=30" > "$tmp"
+
+            ACTION="$(python - "$tmp" "$max_age" <<'PY'
+          import json, sys
+          from datetime import datetime, timezone
+          path, max_age = sys.argv[1], float(sys.argv[2])
+          runs=json.load(open(path)).get('workflow_runs', [])
+          if any(r.get('status') in {'queued','in_progress','pending','waiting','requested'} for r in runs):
+              print('ACTIVE'); raise SystemExit
+          successes=[r for r in runs if r.get('status') == 'completed' and r.get('conclusion') == 'success']
+          if not successes:
+              print('DISPATCH'); raise SystemExit
+          latest=max(successes, key=lambda r: r.get('updated_at') or r.get('created_at') or '')
+          ts=latest.get('updated_at') or latest.get('created_at')
+          age=(datetime.now(timezone.utc)-datetime.fromisoformat(ts.replace('Z','+00:00'))).total_seconds()
+          print('DISPATCH' if age > max_age else 'HEALTHY')
+          PY
+            )"
+            echo "${label}_watchdog_action=${ACTION}"
+            if [[ "$ACTION" != "DISPATCH" ]]; then return 0; fi
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
+              -d '{"ref":"main"}'
+            echo "${label}_STALE_WORKFLOW_RESTARTED"
+          }
+
+          check_and_dispatch factory.yml 28800 FACTORY
+          check_and_dispatch nrt.yml 3600 NRT
