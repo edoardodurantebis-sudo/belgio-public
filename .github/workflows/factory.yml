@@ -15,14 +15,17 @@ on:
         required: true
         default: incremental
   schedule:
-    - cron: '27 */4 * * *'
+    # Same effective four-hour refresh cycle as before, but spread across four
+    # short state-safe shards so a hosted-runner shutdown cannot waste the whole cycle.
+    - cron: '27 * * * *'
 
 permissions:
   actions: read
   contents: read
 
-# Never kill a healthy historical collection just because another trigger arrives.
-# New runs queue behind the active certified-state writer instead.
+# Historical and NRT writers share one cumulative-state lock. Never kill the
+# active writer; GitHub may replace an older pending run with a newer one, which
+# is harmless because every successful run restores the latest certified state.
 concurrency:
   group: belgium-public-data-v2
   cancel-in-progress: false
@@ -30,8 +33,6 @@ concurrency:
 jobs:
   factory:
     runs-on: ubuntu-latest
-    # The public backfill can occasionally be slow because of upstream APIs and
-    # GitHub-hosted runner variability. Recovery remains handled by the watchdog.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -48,16 +49,56 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          EXTRA_ARGS=()
+          SHARD_LABEL="full"
+
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual runs remain explicit/full by design.
             MODE="${{ github.event.inputs.mode }}"
           elif [[ "${BELGIUM_STATE_RESTORED:-0}" == "1" ]]; then
             MODE="incremental"
+
+            # The three mixed forecast/actual histories intentionally need a
+            # 30-day overlap to preserve revisions. They are the heavy exports,
+            # so refresh each alone. All smaller outcome/JAO sources share shard 3.
+            # GITHUB_RUN_NUMBER is stable across rerun attempts, so a watchdog
+            # retry always retries exactly the same source shard.
+            SHARD=$(( (GITHUB_RUN_NUMBER - 1) % 4 ))
+            case "$SHARD" in
+              0)
+                SHARD_LABEL="load-ods001"
+                EXTRA_ARGS=(--source ods001)
+                ;;
+              1)
+                SHARD_LABEL="wind-ods031"
+                EXTRA_ARGS=(--source ods031)
+                ;;
+              2)
+                SHARD_LABEL="solar-ods032"
+                EXTRA_ARGS=(--source ods032)
+                ;;
+              3)
+                SHARD_LABEL="outcomes-jao"
+                EXTRA_ARGS=(
+                  --source ods134
+                  --source ods047
+                  --source ods127
+                  --source ods132
+                  --source ods166
+                  --source ods026
+                  --source jao_core_final_computation
+                )
+                ;;
+            esac
           else
+            # First-ever/no-artifact recovery keeps complete bootstrap semantics.
             MODE="bootstrap"
           fi
+
           echo "BELGIUM_FACTORY_MODE=${MODE}" >> "$GITHUB_ENV"
-          echo "Factory mode: ${MODE}"
-          python scripts/run_factory.py --mode "${MODE}" --strict-core
+          echo "BELGIUM_FACTORY_SHARD=${SHARD_LABEL}" >> "$GITHUB_ENV"
+          echo "Factory mode=${MODE} shard=${SHARD_LABEL} run_number=${GITHUB_RUN_NUMBER}"
+          python scripts/run_factory.py --mode "${MODE}" --strict-core "${EXTRA_ARGS[@]}"
       - name: Audit JAO Core CNEC/RAM/PTDF endpoint without guessing
         run: python scripts/run_jao_audit.py
       - name: Build reproducible ex-post case registry
@@ -76,6 +117,7 @@ jobs:
           test -d data/canonical
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
           p=Path('state/RUN_MANIFEST.json')
           m=json.loads(p.read_text())
@@ -84,7 +126,13 @@ jobs:
               raise SystemExit(f'CORE_FAILURES_PRESENT:{bad}')
           if not m.get('selected_sources'):
               raise SystemExit('NO_SELECTED_SOURCES')
-          print('STATE_CERTIFIED', m.get('mode'), m.get('health'), len(m.get('selected_sources', [])))
+          print(
+              'STATE_CERTIFIED',
+              m.get('mode'),
+              m.get('health'),
+              len(m.get('selected_sources', [])),
+              'shard='+os.environ.get('BELGIUM_FACTORY_SHARD', 'unknown'),
+          )
           PY
       - name: Upload certified cumulative public-data state
         uses: actions/upload-artifact@v4
