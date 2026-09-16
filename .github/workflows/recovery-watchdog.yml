@@ -2,6 +2,10 @@ name: Belgium Recovery Watchdog
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recovery-watchdog.yml'
   workflow_run:
     workflows:
       - "Belgium Public Historical Factory"
