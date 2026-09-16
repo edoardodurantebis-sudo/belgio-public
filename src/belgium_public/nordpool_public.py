@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -90,7 +91,7 @@ def fetch_nordpool_public_day(
                 NORDPOOL_PUBLIC_URL,
                 params=params,
                 timeout=timeout,
-                headers={"User-Agent": "belgio-public/0.6"},
+                headers={"User-Agent": "belgio-public/0.7"},
             )
             if r.status_code == 204:
                 raise NordPoolPublicError(f"NORDPOOL_NO_CONTENT:{day}")
@@ -143,15 +144,19 @@ def backfill_nordpool_public(
     raw_root: Path,
     *,
     max_days: int = 220,
+    max_workers: int = 4,
     session: requests.Session | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Incrementally fill missing Belgian DA days, oldest first plus recent refresh.
+    """Incrementally fill missing Belgian DA days with bounded concurrency.
 
     The first 220-day slice is deliberately large enough to build a six-month
     pre-2026-04-01 training sample from the 2025-10-01 PT15 go-live in one run.
-    Subsequent runs fill the remaining history automatically.
+    Public requests are parallelised conservatively (default four workers) to
+    avoid turning a few hundred independent delivery-day calls into a long
+    serial GitHub Actions bottleneck. A caller-supplied Session forces serial
+    execution because requests.Session is not treated as thread-safe here.
+    Every day is still validated independently and output order is deterministic.
     """
-    session = session or requests.Session()
     miss = missing_local_days(existing, start, end)
     selected = miss[:max_days]
     # Always refresh the last three completed delivery days when they are not
@@ -162,16 +167,46 @@ def backfill_nordpool_public(
         if d not in selected:
             selected.append(d)
 
+    started = time.monotonic()
+    results: dict[date, tuple[pd.DataFrame, dict[str, Any]]] = {}
+    failures_by_day: dict[date, str] = {}
+    requested_workers = max(1, int(max_workers))
+    workers_used = 1 if session is not None else min(requested_workers, max(1, len(selected)))
+
+    def _fetch_one(day: date) -> tuple[pd.DataFrame, dict[str, Any]]:
+        if session is not None:
+            return fetch_nordpool_public_day(day, raw_root, session=session)
+        with requests.Session() as local_session:
+            return fetch_nordpool_public_day(day, raw_root, session=local_session)
+
+    if workers_used <= 1:
+        for day in selected:
+            try:
+                results[day] = _fetch_one(day)
+            except Exception as exc:
+                failures_by_day[day] = f"{type(exc).__name__}: {exc}"
+    else:
+        with ThreadPoolExecutor(max_workers=workers_used, thread_name_prefix="nordpool-be-da") as pool:
+            futures = {pool.submit(_fetch_one, day): day for day in selected}
+            for future in as_completed(futures):
+                day = futures[future]
+                try:
+                    results[day] = future.result()
+                except Exception as exc:
+                    failures_by_day[day] = f"{type(exc).__name__}: {exc}"
+
+    # Preserve delivery-day order regardless of completion order. This makes
+    # artifacts reproducible and avoids concurrency affecting downstream hashes.
     frames: list[pd.DataFrame] = []
     day_meta: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     for day in selected:
-        try:
-            x, meta = fetch_nordpool_public_day(day, raw_root, session=session)
+        if day in results:
+            x, meta = results[day]
             frames.append(x)
             day_meta.append(meta)
-        except Exception as exc:
-            failures.append({"date": day.isoformat(), "error": f"{type(exc).__name__}: {exc}"})
+        elif day in failures_by_day:
+            failures.append({"date": day.isoformat(), "error": failures_by_day[day]})
 
     fresh = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     meta = {
@@ -183,6 +218,9 @@ def backfill_nordpool_public(
         "successful_days": int(len(day_meta)),
         "failed_days": int(len(failures)),
         "rows": int(len(fresh)),
+        "max_workers_requested": requested_workers,
+        "workers_used": workers_used,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
         "days": day_meta,
         "failures": failures[:50],
     }
