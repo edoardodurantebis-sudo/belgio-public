@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,6 @@ class NordPoolPublicError(RuntimeError):
 
 
 def parse_nordpool_public_payload(payload: dict[str, Any], area: str = "BE") -> pd.DataFrame:
-    """Parse the JSON used by Nord Pool's public Data Portal.
-
-    This endpoint is on an official Nord Pool domain and powers the public Data
-    Portal, but it is not the subscription-backed documented Market Data API.
-    Treat it as a public research source and preserve raw responses/provenance.
-    """
     entries = payload.get("multiAreaEntries")
     if not isinstance(entries, list):
         raise NordPoolPublicError("NORDPOOL_BAD_MULTI_AREA_ENTRIES")
@@ -61,7 +56,6 @@ def _validate_day(day: date, rows: pd.DataFrame) -> dict[str, Any]:
     common = float(diffs.mode().iloc[0]) if len(diffs) else np.nan
     local_dates = ts.dt.tz_convert(BRUSSELS).dt.date
     in_day = int((local_dates == day).sum())
-    # Normal / DST-short / DST-long local days in PT15.
     if len(ts) not in {92, 96, 100} or in_day != len(ts):
         raise NordPoolPublicError(f"NORDPOOL_BAD_DAY_CARDINALITY:{day}:rows={len(ts)}:local_rows={in_day}")
     if len(diffs) and common != 900.0:
@@ -78,10 +72,18 @@ def fetch_nordpool_public_day(
     session: requests.Session | None = None,
     timeout: int = 30,
     retries: int = 3,
+    persist_raw: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fetch one recent delivery day for validation/cross-check purposes.
+
+    The public Data Portal backend is deliberately *not* used as the historical
+    source of record. Nord Pool sells historical access and redistribution
+    rights separately, so public-repo collection stays transient by default:
+    values may be compared in-memory, while raw market data are not written to
+    the public artifact unless a future explicitly licensed use enables it.
+    """
     session = session or requests.Session()
     params = {"date": day.isoformat(), "market": "DayAhead", "deliveryArea": area, "currency": currency}
-    raw_root.mkdir(parents=True, exist_ok=True)
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         retrieved = datetime.now(timezone.utc)
@@ -90,7 +92,7 @@ def fetch_nordpool_public_day(
                 NORDPOOL_PUBLIC_URL,
                 params=params,
                 timeout=timeout,
-                headers={"User-Agent": "belgio-public/0.6"},
+                headers={"User-Agent": "belgio-public/0.8"},
             )
             if r.status_code == 204:
                 raise NordPoolPublicError(f"NORDPOOL_NO_CONTENT:{day}")
@@ -102,18 +104,21 @@ def fetch_nordpool_public_day(
             parsed["entry_source_upstream"] = "Nord Pool Day-Ahead / SDAC"
             parsed["entry_source_url"] = NORDPOOL_PUBLIC_URL
             parsed["entry_retrieved_at_utc"] = pd.Timestamp(retrieved)
-            stamp = retrieved.strftime("%Y%m%dT%H%M%SZ")
-            (raw_root / f"{day}_{stamp}.json").write_text(
-                json.dumps(
-                    {"request": params, "retrieved_at_utc": retrieved.isoformat(), "http_status": r.status_code, "payload": payload},
-                    default=str,
-                ),
-                encoding="utf-8",
-            )
+            if persist_raw:
+                raw_root.mkdir(parents=True, exist_ok=True)
+                stamp = retrieved.strftime("%Y%m%dT%H%M%SZ")
+                (raw_root / f"{day}_{stamp}.json").write_text(
+                    json.dumps(
+                        {"request": params, "retrieved_at_utc": retrieved.isoformat(), "http_status": r.status_code, "payload": payload},
+                        default=str,
+                    ),
+                    encoding="utf-8",
+                )
             meta = {
                 "status": "PASS",
                 "source": "Nord Pool public Data Portal backend",
-                "classification": "PUBLIC_OFFICIAL_DOMAIN_UNDOCUMENTED_ENDPOINT",
+                "classification": "RECENT_TRANSIENT_CROSSCHECK_ONLY",
+                "raw_persisted": bool(persist_raw),
                 "url": NORDPOOL_PUBLIC_URL,
                 "area": area,
                 "currency": currency,
@@ -142,47 +147,78 @@ def backfill_nordpool_public(
     end: date,
     raw_root: Path,
     *,
-    max_days: int = 220,
+    max_days: int = 8,
+    max_workers: int = 4,
     session: requests.Session | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Incrementally fill missing Belgian DA days, oldest first plus recent refresh.
+    """Fetch only a small recent window for cross-source validation.
 
-    The first 220-day slice is deliberately large enough to build a six-month
-    pre-2026-04-01 training sample from the 2025-10-01 PT15 go-live in one run.
-    Subsequent runs fill the remaining history automatically.
+    This function keeps the historical name for API compatibility, but it no
+    longer attempts to backfill old Nord Pool prices into the public project.
+    It chooses the most recent missing days, plus the latest three completed
+    days for refresh, and never persists raw responses by default.
     """
-    session = session or requests.Session()
     miss = missing_local_days(existing, start, end)
-    selected = miss[:max_days]
-    # Always refresh the last three completed delivery days when they are not
-    # already among the selected missing days; final prices should be immutable,
-    # but this catches upstream corrections and provides a cheap health check.
+    selected = miss[-max_days:] if max_days > 0 else []
     recent = [end - timedelta(days=i) for i in range(0, 3) if end - timedelta(days=i) >= start]
     for d in recent:
         if d not in selected:
             selected.append(d)
+    selected = sorted(set(selected))
+
+    started = time.monotonic()
+    results: dict[date, tuple[pd.DataFrame, dict[str, Any]]] = {}
+    failures_by_day: dict[date, str] = {}
+    requested_workers = max(1, int(max_workers))
+    workers_used = 1 if session is not None else min(requested_workers, max(1, len(selected)))
+
+    def _fetch_one(day: date) -> tuple[pd.DataFrame, dict[str, Any]]:
+        if session is not None:
+            return fetch_nordpool_public_day(day, raw_root, session=session, persist_raw=False)
+        with requests.Session() as local_session:
+            return fetch_nordpool_public_day(day, raw_root, session=local_session, persist_raw=False)
+
+    if workers_used <= 1:
+        for day in selected:
+            try:
+                results[day] = _fetch_one(day)
+            except Exception as exc:
+                failures_by_day[day] = f"{type(exc).__name__}: {exc}"
+    else:
+        with ThreadPoolExecutor(max_workers=workers_used, thread_name_prefix="nordpool-be-da") as pool:
+            futures = {pool.submit(_fetch_one, day): day for day in selected}
+            for future in as_completed(futures):
+                day = futures[future]
+                try:
+                    results[day] = future.result()
+                except Exception as exc:
+                    failures_by_day[day] = f"{type(exc).__name__}: {exc}"
 
     frames: list[pd.DataFrame] = []
     day_meta: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     for day in selected:
-        try:
-            x, meta = fetch_nordpool_public_day(day, raw_root, session=session)
+        if day in results:
+            x, meta = results[day]
             frames.append(x)
             day_meta.append(meta)
-        except Exception as exc:
-            failures.append({"date": day.isoformat(), "error": f"{type(exc).__name__}: {exc}"})
+        elif day in failures_by_day:
+            failures.append({"date": day.isoformat(), "error": failures_by_day[day]})
 
     fresh = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     meta = {
         "status": "PASS" if frames else "FAIL",
         "source": "Nord Pool public Data Portal backend",
-        "classification": "PUBLIC_OFFICIAL_DOMAIN_UNDOCUMENTED_ENDPOINT",
+        "classification": "RECENT_TRANSIENT_CROSSCHECK_ONLY",
+        "historical_source_of_record": False,
         "requested_missing_days": int(len(miss)),
         "attempted_days": int(len(selected)),
         "successful_days": int(len(day_meta)),
         "failed_days": int(len(failures)),
         "rows": int(len(fresh)),
+        "max_workers_requested": requested_workers,
+        "workers_used": workers_used,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
         "days": day_meta,
         "failures": failures[:50],
     }
