@@ -21,14 +21,18 @@ permissions:
   actions: read
   contents: read
 
+# Never kill a healthy historical collection just because another trigger arrives.
+# New runs queue behind the active certified-state writer instead.
 concurrency:
   group: belgium-public-data-v2
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   factory:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The public backfill can occasionally be slow because of upstream APIs and
+    # GitHub-hosted runner variability. Recovery remains handled by the watchdog.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
