@@ -26,8 +26,8 @@
       "title": "Quarter-hourly market design changes the useful signal set",
       "question": "Did the introduction of quarter-hourly day-ahead pricing materially change the stability of hourly versus quarter-hourly relationships?",
       "required_public_sources": ["official_market_design_documentation", "public_Belgian_DA_QH_prices", "ods134"],
-      "time_controls": ["officially verify go-live date", "never pool pre/post without separate estimates"],
-      "status": "needs_official_breakpoint_verification",
+      "time_controls": ["use the officially verified first business delivery date", "exact intraday UTC transition is not inferred when the official source does not provide it", "never pool pre/post without separate estimates"],
+      "status": "official_breakpoint_verified_pit_still_uncertified",
       "promotion_rule": "All discovery results must report pre/post performance separately."
     },
     {
