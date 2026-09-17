@@ -51,8 +51,11 @@ def test_two_stage_requires_validation_and_final_pass(monkeypatch, tmp_path):
     assert out["validation_rows"] > 0
     assert out["final_rows"] > 0
     assert out["validation_gate_pass_count"] == 1
-    assert out["review_ready_count"] == 1
-    assert out["candidates"][0]["machine_status"] == "REVIEW_READY"
+    assert out["review_ready_count"] == 0
+    assert out["diagnostic_pass_count"] == 1
+    assert out["promotion_eligible"] is False
+    assert out["independent_holdout"] is False
+    assert out["candidates"][0]["machine_status"] == "DIAGNOSTIC_PASS"
     assert out["candidates"][0]["val_fdr_pass"] is True
     assert out["candidates"][0]["final_fdr_pass"] is True
 
@@ -70,7 +73,7 @@ def test_final_holdout_can_kill_validation_winner(monkeypatch, tmp_path):
     row = out["candidates"][0]
     assert row["validation_gate_pass"] is True
     assert row["final_gate_pass"] is False
-    assert row["machine_status"] == "FINAL_HOLDOUT_FAIL"
+    assert row["machine_status"] == "FINAL_SLICE_FAIL"
     assert out["review_ready_count"] == 0
 
 
@@ -94,3 +97,4 @@ def test_two_stage_fails_closed_when_final_slice_missing(tmp_path):
     out = pv.run_two_stage_profit_lab(panel, registry, tmp_path / "out.json", "2026-04-01", "2026-07-01")
     assert out["status"] == "BLOCKED_INSUFFICIENT_TEMPORAL_SPLITS"
     assert out["final_rows"] == 0
+

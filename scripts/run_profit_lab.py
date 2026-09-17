@@ -100,11 +100,15 @@ def main() -> int:
         status = "BLOCKED"
     summary = {
         "status": status,
-        "objective": "DIRECT_GROSS_PNL_DA_ENTRY_TO_IMBALANCE_PT15_TWO_STAGE_OOS_BOTH_DIRECTIONS",
+        "objective": "DIRECT_GROSS_PNL_DA_ENTRY_TO_IMBALANCE_PT15_CHRONOLOGICAL_DIAGNOSTIC_BOTH_DIRECTIONS",
         "validation_from": validation_from,
         "final_holdout_from": final_holdout_from,
         "entry_state": entry_state,
         "entry_promotable": entry_promotable,
+        "promotion_eligible": False,
+        "evidence_classification": "DIAGNOSTIC/PSEUDO_OOS",
+        "pit_certification": "NOT_CERTIFIED",
+        "independent_holdout": False,
         "routes": detailed,
         "candidate_count": len(combined),
         "review_ready_count": ready,
@@ -112,7 +116,7 @@ def main() -> int:
         "candidates": combined[:200],
         "policy": (
             "Definitions/thresholds frozen on train. Validation Apr-Jun selects under FDR; only selected candidates "
-            "are opened on the Jul+ final holdout. Entry-source promotion is a separate independent gate."
+            "are evaluated on the Jul+ chronological diagnostic slice, repeatedly exposed across runs. No independent OOS or record-level PIT certification is established; entry-source assurance alone cannot grant admission."
         ),
     }
     out = ROOT / "research" / "PROFIT_LAB_STATUS.json"
@@ -129,3 +133,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
