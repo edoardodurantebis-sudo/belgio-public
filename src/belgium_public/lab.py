@@ -38,11 +38,17 @@ def _hypothesis_summary() -> dict:
 
 
 def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
-    health = _load_json(health_path)
+    # Missing/malformed state is a technical fault, not a known scientific gap.
+    health = json.loads(health_path.read_text(encoding="utf-8"))
+    if health.get("overall_status") not in {"PASS", "FAIL"}:
+        raise ValueError("INVALID_DATA_HEALTH_STATE")
     hypotheses = _hypothesis_summary()
     if health.get("overall_status") != "PASS":
         payload = {
             "status": "BLOCKED",
+            "operation_class": "SCIENTIFIC_BLOCK",
+            "scientific_state": "BLOCKED_DATA_HEALTH",
+            "promotion_eligible": False,
             "reason": "DATA_HEALTH core gate is not PASS",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "research_hypotheses": hypotheses,
@@ -106,6 +112,9 @@ def run_lab(canonical_root: Path, health_path: Path, out_path: Path) -> dict:
 
     payload = {
         "status": "PASS_NO_EDGE_PROMOTED",
+        "operation_class": "SCIENTIFIC_BLOCK",
+        "scientific_state": "NO_CERTIFIED_INPUT_NO_VIEW",
+        "promotion_eligible": False,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "research_hypotheses": hypotheses,
         "mechanisms": mechanisms,

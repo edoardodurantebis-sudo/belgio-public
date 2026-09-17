@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import sys
 
 from belgium_public.config import ROOT
 from belgium_public.profit_validation import run_two_stage_profit_lab
@@ -64,7 +66,24 @@ def main() -> int:
     }
     out = ROOT / "research" / "PROFIT_COMPUTE_STATUS.json"
     out.parent.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(ROOT))
+    from governance.operation_status import record, source_identity, publish
+    previous = json.loads(out.read_text()) if out.exists() else None
+    if previous and 'schema' not in previous:
+        if previous.get('status') != 'PIT_UNCERTIFIED' or previous.get('research_executed') is not False:
+            raise ValueError('UNRECOGNIZED_LEGACY_PROFIT_STATUS')
+        previous = None  # First observation under the versioned status contract.
+    inputs = {}
+    for path in sorted((ROOT / 'research' / 'profit').glob('PROFIT_PANEL_*.parquet')):
+        with path.open('rb') as stream:
+            inputs[path.name] = hashlib.file_digest(stream, 'sha256').hexdigest()
+    registry = ROOT / 'research/profit/FEATURE_REGISTRY.csv'
+    inputs['feature_registry'] = hashlib.sha256(registry.read_bytes()).hexdigest() if registry.exists() else 'MISSING'
+    status = record('PIT_UNCERTIFIED/BLOCKED', 'RECORD_PUBLICATION_VINTAGE_NOT_ADMITTED',
+                    inputs, source_identity(ROOT), previous, scope='Belgium profit discovery')
+    hold.update(status)
     out.write_text(json.dumps(hold, indent=2) + "\n", encoding="utf-8")
+    publish(status, ROOT / 'research' / 'operation')
     print("PROFIT_COMPUTE_BLOCKED " + json.dumps(hold, sort_keys=True))
     return 0
 
