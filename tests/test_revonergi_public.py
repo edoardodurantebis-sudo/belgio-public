@@ -1,8 +1,36 @@
 from datetime import date
 
 import pandas as pd
+import pytest
+from unittest.mock import patch
 
 from belgium_public.revonergi_public import parse_revonergi_payload, validate_revonergi_day
+
+def test_dead_endpoint_circuit_does_not_repeat_hundreds_of_failed_days(tmp_path):
+    from belgium_public.revonergi_public import backfill_revonergi_history,RevonergiPublicError
+    with patch('belgium_public.revonergi_public.fetch_revonergi_day',side_effect=RevonergiPublicError('unavailable')) as fetch:
+        rows,meta=backfill_revonergi_history(pd.DataFrame(),date(2025,10,1),date(2026,9,16),tmp_path,max_workers=2)
+    assert rows.empty
+    assert fetch.call_count==4
+    assert meta['circuit_open'] is True
+    assert meta['deferred_days']>300
+
+def test_current_points_schema_has_explicit_kwh_units_even_at_extreme_prices():
+    day=date(2026,9,16)
+    points=[{'t':f'{h:02d}:{m:02d}','price':-6.0,'idx':h*4+m//15} for h in range(24) for m in (0,15,30,45)]
+    frame=parse_revonergi_payload({'ok':True,'date':str(day),'points':points},day)
+    assert validate_revonergi_day(day,frame)['rows']==96
+    assert frame.entry_price.eq(-6000).all()
+    with pytest.raises(RuntimeError):
+        parse_revonergi_payload({'ok':True,'date':'2026-09-15','points':points},day)
+
+def test_local_labels_cannot_guess_autumn_fold_or_accept_wrong_day_cardinality():
+    day=date(2025,10,26)
+    points=[{'t':f'{h:02d}:{m:02d}','price':.1} for h in range(24) for m in (0,15,30,45)]
+    frame=parse_revonergi_payload({'ok':True,'date':str(day),'points':points},day)
+    with pytest.raises(RuntimeError):validate_revonergi_day(day,frame)
+    normal=pd.date_range('2026-09-16T00:00:00',periods=92,freq='15min',tz='Europe/Brussels').tz_convert('UTC')
+    with pytest.raises(RuntimeError):validate_revonergi_day(date(2026,9,16),pd.DataFrame({'delivery_start_utc':normal,'entry_price':1.}))
 
 
 def test_parse_revonergi_hhmm_eur_mwh_rows():

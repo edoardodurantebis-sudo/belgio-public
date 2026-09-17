@@ -70,11 +70,11 @@ def _localize_hhmm(day: date, value: str, occurrence: int = 0) -> pd.Timestamp:
         base = datetime.combine(day + timedelta(days=1), dtime(0, minute, sec))
     else:
         base = datetime.combine(day, dtime(h, minute, sec))
-    # Ambiguous autumn hour is uncommon in compact APIs. Pandas needs an
-    # explicit choice; occurrence=0 picks first, occurrence=1 second.
+    # Repeated local labels alone cannot identify physical autumn folds.
+    # Never infer a fold from row order or shift a nonexistent spring interval.
     ts = pd.Timestamp(base)
     try:
-        local = ts.tz_localize(BRUSSELS, ambiguous=bool(occurrence), nonexistent="shift_forward")
+        local = ts.tz_localize(BRUSSELS, ambiguous='raise', nonexistent='raise')
     except TypeError:
         local = ts.tz_localize(BRUSSELS)
     return local.tz_convert("UTC")
@@ -116,6 +116,9 @@ def _price_eur_mwh(row: dict[str, Any]) -> float | None:
 
 
 def parse_revonergi_payload(payload: Any, day: date) -> pd.DataFrame:
+    current_points = isinstance(payload,dict) and 'points' in payload
+    if current_points and (payload.get('ok') is not True or payload.get('date') != day.isoformat()):
+        raise RevonergiPublicError('REVONERGI_RESPONSE_DAY_OR_STATUS_MISMATCH')
     rows = _candidate_rows(payload)
     out: list[dict[str, Any]] = []
     compact_times: list[str] = []
@@ -125,12 +128,13 @@ def parse_revonergi_payload(payload: Any, day: date) -> pd.DataFrame:
             continue
         if not isinstance(item, dict):
             continue
-        price = _price_eur_mwh(item)
+        # Documented current points.price is EUR/kWh, independent of magnitude.
+        price = float(item['price'])*1000.0 if current_points and 'price' in item else _price_eur_mwh(item)
         if price is None or not np.isfinite(price):
             continue
         stamp = _first(item, (
             "delivery_start_utc", "deliveryStart", "datetime", "timestamp", "dateTime",
-            "start", "startTime", "tijdstip", "time", "tijd", "uur",
+            "start", "startTime", "tijdstip", "time", "tijd", "uur", "t",
         ))
         if stamp is None:
             continue
@@ -184,10 +188,14 @@ def validate_revonergi_day(day: date, rows: pd.DataFrame) -> dict[str, Any]:
         raise RevonergiPublicError(f"REVONERGI_WRONG_LOCAL_DAY:{day}")
     diffs = ts.diff().dropna().dt.total_seconds()
     common = float(diffs.mode().iloc[0]) if len(diffs) else np.nan
-    expected_counts = {92, 96, 100} if day >= QH_GO_LIVE else {23, 24, 25}
     expected_step = 900.0 if day >= QH_GO_LIVE else 3600.0
-    if len(ts) not in expected_counts:
+    start=pd.Timestamp(day).tz_localize(BRUSSELS).tz_convert('UTC')
+    end=pd.Timestamp(day+timedelta(days=1)).tz_localize(BRUSSELS).tz_convert('UTC')
+    expected=pd.date_range(start,end,inclusive='left',freq=pd.Timedelta(seconds=expected_step))
+    if len(ts) != len(expected):
         raise RevonergiPublicError(f"REVONERGI_BAD_CARDINALITY:{day}:rows={len(ts)}")
+    if list(ts) != list(expected):
+        raise RevonergiPublicError(f"REVONERGI_PHYSICAL_GRID_MISMATCH:{day}")
     if len(diffs) and common != expected_step:
         raise RevonergiPublicError(f"REVONERGI_BAD_STEP:{day}:step={common}")
     return {"date": day.isoformat(), "rows": int(len(ts)), "common_step_seconds": common}
@@ -291,14 +299,23 @@ def backfill_revonergi_history(
         with requests.Session() as s:
             return fetch_revonergi_day(day, raw_root, session=s, persist_raw=True)
 
+    empty_batches=0
+    circuit_open=False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="revonergi-be-da") as pool:
-        futures = {pool.submit(one, d): d for d in selected}
-        for fut in as_completed(futures):
-            d = futures[fut]
-            try:
-                results[d] = fut.result()
-            except Exception as exc:
-                failures[d] = f"{type(exc).__name__}: {exc}"
+        for offset in range(0,len(selected),workers):
+            batch=selected[offset:offset+workers]
+            futures = {pool.submit(one, d): d for d in batch}
+            successes_before=len(results)
+            for fut in as_completed(futures):
+                d = futures[fut]
+                try:
+                    results[d] = fut.result()
+                except Exception as exc:
+                    failures[d] = f"{type(exc).__name__}: {exc}"
+            empty_batches=empty_batches+1 if len(results)==successes_before else 0
+            if empty_batches>=2:
+                circuit_open=True
+                break
 
     frames: list[pd.DataFrame] = []
     day_meta: list[dict[str, Any]] = []
@@ -317,7 +334,9 @@ def backfill_revonergi_history(
         "classification": "PUBLIC_SOURCE_STATED_FREE_COMMERCIAL_REUSE",
         "rights_page": REVONERGI_RIGHTS_URL,
         "requested_missing_days": len(missing),
-        "attempted_days": len(selected),
+        "attempted_days": len(results)+len(failures),
+        "deferred_days": len(selected)-len(results)-len(failures),
+        "circuit_open": circuit_open,
         "successful_days": len(day_meta),
         "failed_days": len(failure_rows),
         "rows": int(len(fresh)),
