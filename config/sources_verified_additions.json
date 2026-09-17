@@ -3,9 +3,76 @@
   "purpose": "Official-source additions and live-verified endpoint replacements merged by the central registry loader.",
   "remove_ids": ["jao_core_maxexchanges"],
   "structural_breaks": [
-    {"date": "2024-05-29", "name": "CORE_IDCC_B_GO_LIVE", "rule": "Treat IDCC(b) capacity publications as a separate intraday-capacity regime; scheduled publication is not a historical knowledge timestamp."},
-    {"date": "2025-06-25", "name": "CORE_IDCC_C_GO_LIVE", "rule": "Treat IDCC(c) as a separate regime and flag documented fallback/incident business days."},
-    {"date": "2026-04-28", "name": "CORE_IDCC_D_GO_LIVE", "rule": "Treat IDCC(d) as a separate regime; do not backcast its availability before go-live."}
+    {
+      "date": "2024-05-29",
+      "name": "CORE_IDCC_B_GO_LIVE",
+      "rule": "Treat IDCC(b) capacity publications as a separate intraday-capacity regime; scheduled publication is not a historical knowledge timestamp.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "pit_certification": false,
+      "precise_utc_transition": null,
+      "source_url": "https://www.jao.eu/news/core-idcc-successful-go-live-first-core-flow-based",
+      "process_go_live_date": "2024-05-28",
+      "date_basis": "FIRST_BUSINESS_DELIVERY_DATE"
+    },
+    {
+      "date": "2025-06-25",
+      "name": "CORE_IDCC_C_GO_LIVE",
+      "rule": "Treat IDCC(c) as a separate regime and flag documented fallback/incident business days.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "pit_certification": false,
+      "precise_utc_transition": null,
+      "source_url": "https://www.jao.eu/news/core-fallback-triggered-go-live-core-flow-based",
+      "date_basis": "FIRST_BUSINESS_DELIVERY_DATE_WITH_FALLBACK",
+      "incident_business_dates": [
+        "2025-06-25"
+      ],
+      "first_successful_business_date": "2025-06-26"
+    },
+    {
+      "date": "2026-04-28",
+      "name": "CORE_IDCC_D_GO_LIVE",
+      "rule": "Treat IDCC(d) as a separate regime; do not backcast its availability before go-live.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "pit_certification": false,
+      "precise_utc_transition": null,
+      "source_url": "https://www.jao.eu/news/successful-go-live-first-core-flow-based-intraday",
+      "date_basis": "BUSINESS_DELIVERY_DATE"
+    },
+    {
+      "date": "2024-11-26",
+      "name": "ELIA_PICASSO_PLATFORM_ACCESSION",
+      "source_url": "https://www.elia.be/-/media/project/elia/shared/documents/press-releases/2024/20241128_picasso-press-release_en_v2.pdf",
+      "source_publication_date": "2024-11-28",
+      "date_basis": "ACTUAL_ACCESSION_DATE",
+      "source_stated_clock_interval": "11:15-11:30; UTC offset not resolved here",
+      "rule": "Separate pre/post aFRR platform regimes; treat transition day as mixed unless an independently verified UTC transition is supplied.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    },
+    {
+      "date": "2025-05-21",
+      "name": "ELIA_MARI_PLATFORM_ACCESSION",
+      "source_url": "https://www.entsoe.eu/documents/nc/NC%20EB/2025/250523_Communication_note_ELIA_go-live.pdf",
+      "source_publication_date": "2025-05-23",
+      "date_basis": "ACTUAL_ACCESSION_DATE",
+      "rule": "European MARI accession is distinct from local mFRR technical go-live2024-05-22. Exact intraday transition is not certified.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    },
+    {
+      "date": "2025-10-01",
+      "name": "SDAC_15_MINUTE_DELIVERY_GO_LIVE",
+      "source_url": "https://www.elia.be/-/media/project/elia/shared/documents/press-releases/2025/20251001_press-release-sdac_en.pdf",
+      "source_publication_date": "2025-10-01",
+      "trading_date": "2025-09-30",
+      "date_basis": "FIRST_BUSINESS_DELIVERY_DATE",
+      "rule": "Do not treat pre-transition hourly DA prices as native quarter-hour auction prices.",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    }
   ],
   "sources": [
     {"id":"jao_core_final_computation","provider":"JAO","name":"Core DA Final Computation — CNEC/RAM/PTDF","family":"core_flow_based","endpoint":"https://publicationtool.jao.eu/core/api/data/finalComputation","documentation":"https://publicationtool.jao.eu/core/CORE_PublicationHandbook","coverage":"Core DA go-live 2022-06-08 onward; progressive backfill","granularity":"MTU x CNEC","timezone":"UTC","primary_key":["id","dateTimeUtc"],"publication_timing":"handbook schedule: Pre-Final about 08:00 D-1 and Final Computation about 10:30 D-1; scheduled time is not assumed to equal actual historical knowledge time","pit_status":"unknown","required_fields":["dateTimeUtc","ram"],"tier":"jao_canary","mode":"jao_daily","validated":true,"preserve_vintages":false,"notes":"Live endpoint/schema verified 2026-09-15 with HTTP 200 and RAM + PTDF + CNEC identity. Collector backfills progressively and preserves each paginated HTTP response."},

@@ -1,9 +1,36 @@
 {
   "schema_version": 1,
   "structural_breaks": [
-    {"date": "2024-05-22", "name": "MARI_LOCAL_GO_LIVE", "rule": "Do not pool pre/post imbalance regimes without validated mapping."},
-    {"date": "2024-05-22", "name": "ICAROS_LOCAL_GO_LIVE", "rule": "Generation/outage series may change definition around this date."},
-    {"date": "2022-06-08", "name": "CORE_FB_DA_GO_LIVE", "rule": "Use JAO Core Publication Tool for Core DA flow-based data from go-live."}
+    {
+      "date": "2024-05-22",
+      "name": "MARI_LOCAL_GO_LIVE",
+      "rule": "Do not pool pre/post imbalance regimes without validated mapping. Local mFRR technical change only; not connection to the European MARI platform.",
+      "date_basis": "LOCAL_TECHNICAL_DELIVERY_DATE",
+      "source_url": "https://www.elia.be/-/media/project/elia/elia-site/users-group/ug/ug-plenaire-vergadering/2024/20240610/pm_bundled_slides_10062024.pdf",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    },
+    {
+      "date": "2024-05-22",
+      "name": "ICAROS_LOCAL_GO_LIVE",
+      "rule": "Generation/outage series may change definition around this date.",
+      "date_basis": "LOCAL_TECHNICAL_DELIVERY_DATE",
+      "source_url": "https://www.elia.be/-/media/project/elia/elia-site/users-group/ug/ug-plenaire-vergadering/2024/20240610/pm_bundled_slides_10062024.pdf",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    },
+    {
+      "date": "2022-06-08",
+      "name": "CORE_FB_DA_GO_LIVE",
+      "rule": "Use JAO Core Publication Tool for Core DA flow-based data from go-live.",
+      "date_basis": "MARKET_COUPLING_LAUNCH_DATE",
+      "source_url": "https://www.entsoe.eu/documents/nc/NC%20CCR%20Regions/2022/Press_Release_Successful_Go-live_Core_FB_MC.pdf",
+      "verification_status": "OFFICIAL_DOCUMENT_DATE_VERIFIED",
+      "precise_utc_transition": null,
+      "pit_certification": false
+    }
   ],
   "sources": [
     {"id":"ods134","provider":"Elia","name":"Imbalance prices per quarter-hour — historical post-MARI","family":"balancing_outcome","endpoint":"https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods134","documentation":"https://opendata.elia.be/explore/dataset/ods134/","coverage":"from 2024-05-22","granularity":"PT15M","timezone":"Europe/Brussels","primary_key":["datetime"],"publication_timing":"quarter-hour values initially non-validated; month M validated after 15th of M+1","pit_status":"outcome_only","required_fields":["datetime"],"tier":"core","mode":"historical","validated":true,"notes":"Settlement/outcome source; never an ex-ante feature."},
