@@ -1,0 +1,37 @@
+name: Belgium Public Evidence Snapshot
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['governance/evidence_snapshot.py', '.github/workflows/evidence-snapshot.yml']
+  workflow_run:
+    workflows: ['Belgium Public Historical Factory', 'Belgium Public NRT Vintage Capture', 'Belgium Public Extended Historical Sources']
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: belgium-public-evidence-snapshot
+  cancel-in-progress: false
+jobs:
+  snapshot:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Restore existing public evidence without rerunning collectors
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/restore_latest_state.sh
+      - name: Export attributable public diagnostic reports
+        run: AUDITED_SOURCE_SHA=$(git rev-parse HEAD) python governance/evidence_snapshot.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: belgium-public-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/belgium-evidence/
+          if-no-files-found: error
+          retention-days: 30
