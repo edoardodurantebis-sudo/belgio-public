@@ -70,3 +70,13 @@ def test_build_profit_base_and_both_direction_panels(tmp_path: Path):
     long = pd.read_parquet(paths["DA_LONG"])
     assert np.allclose(short["gross_pnl_1mw_eur"], (short["imbalance_price"] - short["entry_price"]) * 0.25)
     assert np.allclose(long["gross_pnl_1mw_eur"], (long["entry_price"] - long["imbalance_price"]) * 0.25)
+
+
+
+def test_elapsed_lag_does_not_certify_revised_measurements():
+    registry = feature_registry()
+    admitted = registry[registry.pit_status.eq("CERTIFIED")]
+    assert admitted.feature_id.str.startswith("CTX_").all()
+    memory = registry[registry.feature_id.str.contains("LAG|ROLL|DIR")]
+    assert len(memory) == 11
+    assert memory.pit_status.eq("PIT_UNCERTIFIED").all()

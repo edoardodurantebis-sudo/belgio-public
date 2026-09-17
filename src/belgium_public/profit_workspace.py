@@ -211,17 +211,17 @@ def feature_registry() -> pd.DataFrame:
         ("CTX_WEEKDAY", "ctx_weekday", "CALENDAR", "CERTIFIED"),
         ("CTX_MONTH", "ctx_month", "MONTH", "CERTIFIED"),
         ("CTX_WEEKEND", "ctx_weekend", "WORKCLASS", "CERTIFIED"),
-        ("SI_LAG48", "si_lag48h_mw", "IMBALANCE_MEMORY", "CERTIFIED"),
-        ("SI_ROLL7", "si_roll7d_safe_mean_mw", "IMBALANCE_MEMORY_LEVEL", "CERTIFIED"),
-        ("SI_DIR14", "si_roll14d_safe_directionality", "IMBALANCE_MEMORY_DIRECTION", "CERTIFIED"),
-        ("IP_LAG48", "imb_price_lag48h_eur_mwh", "PRICE_MEMORY", "CERTIFIED"),
-        ("IP_ROLL7", "imb_price_roll7d_safe_mean_eur_mwh", "PRICE_MEMORY_LEVEL", "CERTIFIED"),
-        ("DA_LAG48", "da_price_lag48h_eur_mwh", "ENTRY_MEMORY", "CERTIFIED"),
-        ("DA_ROLL7", "da_price_roll7d_safe_mean_eur_mwh", "ENTRY_MEMORY_LEVEL", "CERTIFIED"),
-        ("LOAD_LAG48", "load_actual_lag48h_mw", "LOAD_MEMORY", "CERTIFIED"),
-        ("WIND_LAG48", "wind_actual_lag48h_mw", "WIND_MEMORY", "CERTIFIED"),
-        ("SOLAR_LAG48", "solar_actual_lag48h_mw", "SOLAR_MEMORY", "CERTIFIED"),
-        ("RESIDUAL_LAG48", "residual_actual_lag48h_mw", "RESIDUAL_MEMORY", "CERTIFIED"),
+        ("SI_LAG48", "si_lag48h_mw", "IMBALANCE_MEMORY", "PIT_UNCERTIFIED"),
+        ("SI_ROLL7", "si_roll7d_safe_mean_mw", "IMBALANCE_MEMORY_LEVEL", "PIT_UNCERTIFIED"),
+        ("SI_DIR14", "si_roll14d_safe_directionality", "IMBALANCE_MEMORY_DIRECTION", "PIT_UNCERTIFIED"),
+        ("IP_LAG48", "imb_price_lag48h_eur_mwh", "PRICE_MEMORY", "PIT_UNCERTIFIED"),
+        ("IP_ROLL7", "imb_price_roll7d_safe_mean_eur_mwh", "PRICE_MEMORY_LEVEL", "PIT_UNCERTIFIED"),
+        ("DA_LAG48", "da_price_lag48h_eur_mwh", "ENTRY_MEMORY", "PIT_UNCERTIFIED"),
+        ("DA_ROLL7", "da_price_roll7d_safe_mean_eur_mwh", "ENTRY_MEMORY_LEVEL", "PIT_UNCERTIFIED"),
+        ("LOAD_LAG48", "load_actual_lag48h_mw", "LOAD_MEMORY", "PIT_UNCERTIFIED"),
+        ("WIND_LAG48", "wind_actual_lag48h_mw", "WIND_MEMORY", "PIT_UNCERTIFIED"),
+        ("SOLAR_LAG48", "solar_actual_lag48h_mw", "SOLAR_MEMORY", "PIT_UNCERTIFIED"),
+        ("RESIDUAL_LAG48", "residual_actual_lag48h_mw", "RESIDUAL_MEMORY", "PIT_UNCERTIFIED"),
         ("WIND_DA11", "wind_da11h_mw", "WIND_DA", "CANDIDATE_FIELD_TIME"),
         ("SOLAR_DA11", "solar_da11h_mw", "SOLAR_DA", "CANDIDATE_FIELD_TIME"),
         ("RENEW_DA11", "renewable_da11h_mw", "RENEWABLE_DA", "CANDIDATE_FIELD_TIME"),
@@ -229,7 +229,11 @@ def feature_registry() -> pd.DataFrame:
         ("LOAD_DA18", "load_da18h_mw", "LOAD_DA", "UNSAFE_AFTER_DA_GATE"),
         ("RESIDUAL_MIXED", "residual_load_mixed_timing_mw", "RESIDUAL_DA", "UNSAFE_MIXED_TIMING"),
     ]
-    return pd.DataFrame(rows, columns=["feature_id", "column_name", "family", "pit_status"])
+    registry = pd.DataFrame(rows, columns=["feature_id", "column_name", "family", "pit_status"])
+    registry["certification_scope"] = registry.feature_id.map(
+        lambda x: "DETERMINISTIC_CALENDAR_ONLY" if x.startswith("CTX_") else "NO_RECORD_LEVEL_PUBLICATION_VINTAGE_PROOF"
+    )
+    return registry
 
 
 def build_profit_base(canonical_root: Path, da_prices: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -395,7 +399,11 @@ def build_workspace(repo_root: Path, start: date = DEFAULT_DA_START, end: date |
         "candidate_field_time_feature_count": int(len(candidate)),
         "strict_features": certified.column_name.tolist(),
         "candidate_features_not_used_by_strict_discovery": candidate.column_name.tolist(),
+        "promotion_eligible": False,
+        "evidence_classification": "DIAGNOSTIC/PSEUDO_OOS",
         "known_blockers": [
+            "A 48-hour lag does not establish immutable as-of publication or revision provenance; all measured-memory features remain PIT_UNCERTIFIED",
+            "Repeated chronological splits are not an independently sealed holdout; outcome publication provenance and full adaptive trial history are unavailable",
             "Energy-Charts is a public secondary entry source; independent official EPEX/ENTSO-E cross-check still required before promotion",
             "Wind/solar Day Ahead 11AM fields are source-labelled but remain outside strict discovery until publication timing is fully certified",
             "ODS001 day-ahead load is the 6PM forecast and is after the 12:00 DA gate, so it is excluded from strict DA discovery",
@@ -405,3 +413,4 @@ def build_workspace(repo_root: Path, start: date = DEFAULT_DA_START, end: date |
     }
     (outdir / "READINESS.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return payload
+

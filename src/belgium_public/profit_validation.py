@@ -51,7 +51,7 @@ def run_two_stage_profit_lab(
     validation_from: str,
     final_holdout_from: str,
 ) -> dict:
-    """Train -> validation/FDR -> untouched final holdout economic gate.
+    """Chronological diagnostic train -> selection -> final-slice economic checks.
 
     Thresholds and combinations are discovered only before ``validation_from``.
     The validation slice is then used for multiplicity-controlled candidate
@@ -87,8 +87,9 @@ def run_two_stage_profit_lab(
     final_mask = ts >= final_ts
 
     reg = pd.read_csv(feature_registry_path)
-    if "pit_status" in reg:
-        reg = reg[reg["pit_status"].astype(str).str.upper().eq("CERTIFIED")].copy()
+    if "pit_status" not in reg:
+        raise ValueError("MISSING_FEATURE_PIT_CLASSIFICATION")
+    reg = reg[reg["pit_status"].astype(str).str.upper().eq("CERTIFIED")].copy()
 
     train = panel.loc[train_mask].copy()
     if len(train) < 120 or int(validation_mask.sum()) < 30 or int(final_mask.sum()) < 30:
@@ -149,15 +150,15 @@ def run_two_stage_profit_lab(
             out["final_gate_pass"] = False
 
         if out.get("validation_gate_pass") and out.get("final_gate_pass"):
-            out["machine_status"] = "REVIEW_READY"
+            out["machine_status"] = "DIAGNOSTIC_PASS"
         elif out.get("validation_gate_pass"):
-            out["machine_status"] = "FINAL_HOLDOUT_FAIL"
+            out["machine_status"] = "FINAL_SLICE_FAIL"
         else:
             out["machine_status"] = "VALIDATION_FAIL"
         combined.append(out)
 
     def score(row: dict) -> tuple:
-        status_order = {"REVIEW_READY": 0, "FINAL_HOLDOUT_FAIL": 1, "VALIDATION_FAIL": 2}
+        status_order = {"DIAGNOSTIC_PASS": 0, "FINAL_SLICE_FAIL": 1, "VALIDATION_FAIL": 2}
         try:
             final_pnl = float(row.get("final_total_pnl_1mw_eur", -1e18))
             if not np.isfinite(final_pnl):
@@ -176,7 +177,7 @@ def run_two_stage_profit_lab(
     views = sorted(set(panel["system_view"].dropna().astype(str)))
     payload = {
         "status": "PASS" if combined else "PASS_NO_CANDIDATES",
-        "objective": "DIRECT_GROSS_PNL_ENTRY_TO_IMBALANCE_PT15_TWO_STAGE_OOS",
+        "objective": "DIRECT_GROSS_PNL_ENTRY_TO_IMBALANCE_PT15_CHRONOLOGICAL_DIAGNOSTIC",
         "validation_from": validation_from,
         "final_holdout_from": final_holdout_from,
         "system_views": views,
@@ -186,12 +187,18 @@ def run_two_stage_profit_lab(
         "eligible_feature_count": int(len(reg)),
         "candidate_count": len(combined),
         "validation_gate_pass_count": int(sum(bool(r.get("validation_gate_pass")) for r in combined)),
-        "review_ready_count": int(sum(r.get("machine_status") == "REVIEW_READY" for r in combined)),
+        "review_ready_count": 0,
+        "diagnostic_pass_count": int(sum(r.get("machine_status") == "DIAGNOSTIC_PASS" for r in combined)),
+        "promotion_eligible": False,
+        "evidence_classification": "DIAGNOSTIC/PSEUDO_OOS",
+        "pit_certification": "NOT_CERTIFIED",
+        "independent_holdout": False,
         "candidates": combined[:200],
         "policy": (
             "Definitions and thresholds frozen on train. Validation slice performs FDR-controlled selection. "
-            "Only validation-pass candidates are evaluated on the final holdout; both stages must pass robustness/FDR."
+            "Only validation-pass candidates are evaluated on the final chronological slice; both stages must pass robustness/FDR. Repeated runs expose this slice: no independent holdout or record-level PIT certification is established. Passing diagnostics cannot grant admission."
         ),
     }
     out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return payload
+
