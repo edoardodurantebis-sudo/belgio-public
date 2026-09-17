@@ -44,6 +44,33 @@ def _compact_candidate(row: dict) -> dict:
 
 
 def main() -> int:
+    # Operational hold: the current source contract has no verified record-level
+    # publication/vintage provenance. Preserve prior diagnostics; keep collectors
+    # and NRT capture running so new evidence continues accumulating.
+    from datetime import datetime, timezone
+    health_path = ROOT / "state" / "DATA_HEALTH.json"
+    health = json.loads(health_path.read_text(encoding="utf-8")) if health_path.exists() else {}
+    hold = {
+        "status": "PIT_UNCERTIFIED", "operational_status": "BLOCKED_CLEANLY",
+        "source_health": health.get("overall_status", "UNKNOWN"),
+        "reason": "Record-level publication/vintage provenance is not admitted; source health alone cannot certify PIT.",
+        "research_executed": False, "promotion_eligible": False,
+        "prior_diagnostics_preserved": True,
+        "collectors_and_nrt_continue": True,
+        "resumption_requirement": "Verified source record provenance and an admitted ingestion contract; no boolean override.",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "runtime_identity": {k: os.environ.get(k, "") for k in
+                             ["GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA"]},
+    }
+    out = ROOT / "research" / "PROFIT_COMPUTE_STATUS.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(hold, indent=2) + "\n", encoding="utf-8")
+    print("PROFIT_COMPUTE_BLOCKED " + json.dumps(hold, sort_keys=True))
+    return 0
+
+
+def run_unadmitted_diagnostic_only() -> int:
+    """Retained for historical recovery; not called by the production entrypoint."""
     validation_from = os.getenv("BELGIUM_PROFIT_VALIDATION_FROM", "2026-04-01")
     final_holdout_from = os.getenv("BELGIUM_PROFIT_FINAL_HOLDOUT_FROM", "2026-07-01")
     profit_root = ROOT / "research" / "profit"
